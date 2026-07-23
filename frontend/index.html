@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cut Line — Pattern Drafting & Nesting Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --navy: #0B2545;
+    --navy-deep: #071A33;
+    --grid-line: #274B75;
+    --chalk: #EDF2F4;
+    --ink: #0B2545;
+    --brass: #C9A24B;
+    --thread: #B5495B;
+    --sans: 'IBM Plex Sans', sans-serif;
+    --mono: 'IBM Plex Mono', monospace;
+    --display: 'Fraunces', serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--chalk);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.5;
+  }
+  a { color: inherit; }
+
+  /* ---------- HERO ---------- */
+  .hero {
+    position: relative;
+    min-height: 100vh;
+    background: var(--navy);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 6vh 6vw;
+  }
+  /* original fabric-fan motif, built from CSS conic-gradient wedges,
+     not a photograph — evokes the fanned-swatch reference without
+     reproducing any copyrighted image */
+  .fabric-fan {
+    position: absolute;
+    top: 50%;
+    right: -20%;
+    width: 90vh;
+    height: 90vh;
+    transform: translateY(-50%);
+    border-radius: 50%;
+    background: conic-gradient(
+      from 200deg,
+      var(--brass) 0deg 18deg,
+      var(--thread) 18deg 34deg,
+      #6E8AB0 34deg 50deg,
+      var(--chalk) 50deg 64deg,
+      var(--grid-line) 64deg 82deg,
+      var(--brass) 82deg 96deg,
+      #3C5C82 96deg 114deg,
+      var(--thread) 114deg 128deg,
+      var(--chalk) 128deg 146deg,
+      var(--grid-line) 146deg 162deg,
+      var(--brass) 162deg 180deg,
+      #6E8AB0 180deg 198deg,
+      var(--thread) 198deg 214deg,
+      var(--chalk) 214deg 232deg,
+      var(--grid-line) 232deg 250deg,
+      var(--brass) 250deg 264deg,
+      #3C5C82 264deg 282deg,
+      var(--thread) 282deg 300deg,
+      var(--chalk) 300deg 320deg,
+      var(--grid-line) 320deg 360deg
+    );
+    opacity: 0.85;
+    mask-image: radial-gradient(circle, black 55%, transparent 78%);
+  }
+  .hero-grid-overlay {
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(var(--grid-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+    background-size: 40px 40px;
+    opacity: 0.15;
+  }
+  .hero-content { position: relative; z-index: 2; max-width: 640px; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--brass);
+    margin-bottom: 1.2rem;
+  }
+  h1 {
+    font-family: var(--display);
+    font-optical-sizing: auto;
+    font-weight: 600;
+    font-size: clamp(2.6rem, 5.5vw, 4.2rem);
+    color: var(--chalk);
+    margin: 0 0 1.2rem 0;
+    line-height: 1.05;
+  }
+  h1 em { font-style: italic; color: var(--brass); }
+  .hero-sub {
+    color: #C7D3E3;
+    font-size: 1.15rem;
+    max-width: 480px;
+    margin-bottom: 2.4rem;
+  }
+  .cta-row { display: flex; gap: 1rem; flex-wrap: wrap; }
+  .btn {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 0.95rem;
+    padding: 0.9rem 1.8rem;
+    border-radius: 3px;
+    border: none;
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-block;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn:focus-visible { outline: 3px solid var(--brass); outline-offset: 2px; }
+  .btn-primary { background: var(--brass); color: var(--navy-deep); }
+  .btn-ghost { background: transparent; color: var(--chalk); border: 1px solid #4A628A; }
+
+  /* ---------- HOW IT WORKS ---------- */
+  .how {
+    background: var(--chalk);
+    padding: 5rem 6vw;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 2.5rem;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+  @media (max-width: 800px) { .how { grid-template-columns: 1fr; } }
+  .step-num {
+    font-family: var(--mono);
+    color: var(--brass);
+    font-size: 0.85rem;
+    margin-bottom: 0.6rem;
+  }
+  .step h3 {
+    font-family: var(--display);
+    font-size: 1.4rem;
+    margin: 0 0 0.5rem 0;
+  }
+  .step p { color: #3A4A63; font-size: 0.95rem; margin: 0; }
+
+  /* ---------- DEMO ---------- */
+  .demo {
+    background: var(--navy-deep);
+    padding: 5rem 6vw;
+  }
+  .demo-inner { max-width: 1100px; margin: 0 auto; }
+  .demo h2 {
+    font-family: var(--display);
+    color: var(--chalk);
+    font-size: 2.2rem;
+    margin: 0 0 0.5rem 0;
+  }
+  .demo-sub { color: #9FB2CC; margin-bottom: 2.5rem; max-width: 560px; }
+  .demo-grid {
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    gap: 2.5rem;
+  }
+  @media (max-width: 900px) { .demo-grid { grid-template-columns: 1fr; } }
+  .form-card {
+    background: var(--navy);
+    border: 1px solid var(--grid-line);
+    border-radius: 6px;
+    padding: 1.8rem;
+  }
+  .field { margin-bottom: 1.1rem; }
+  .field label {
+    display: block;
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--brass);
+    margin-bottom: 0.4rem;
+  }
+  .field input, .field select {
+    width: 100%;
+    padding: 0.6rem 0.7rem;
+    background: var(--navy-deep);
+    border: 1px solid var(--grid-line);
+    border-radius: 3px;
+    color: var(--chalk);
+    font-family: var(--mono);
+    font-size: 0.9rem;
+  }
+  .field input:focus, .field select:focus {
+    outline: 2px solid var(--brass);
+    outline-offset: 1px;
+  }
+  .run-btn {
+    width: 100%;
+    margin-top: 0.5rem;
+  }
+  .results { display: flex; flex-direction: column; gap: 1.5rem; }
+  .result-card {
+    background: var(--navy);
+    border: 1px solid var(--grid-line);
+    border-radius: 6px;
+    padding: 1.2rem;
+  }
+  .result-card h4 {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--brass);
+    margin: 0 0 0.8rem 0;
+  }
+  .result-card svg { width: 100%; height: auto; display: block; }
+  .stat-row {
+    display: flex;
+    gap: 2rem;
+    flex-wrap: wrap;
+    margin-top: 1rem;
+    font-family: var(--mono);
+  }
+  .stat { color: var(--chalk); }
+  .stat .num { font-size: 1.6rem; color: var(--brass); display: block; }
+  .stat .label { font-size: 0.75rem; color: #9FB2CC; text-transform: uppercase; }
+  .placeholder {
+    color: #6A7FA0;
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    padding: 2rem;
+    text-align: center;
+    border: 1px dashed var(--grid-line);
+    border-radius: 6px;
+  }
+  .error-box {
+    background: rgba(181, 73, 91, 0.15);
+    border: 1px solid var(--thread);
+    color: #F0B8C1;
+    padding: 0.9rem;
+    border-radius: 4px;
+    font-family: var(--mono);
+    font-size: 0.85rem;
+  }
+
+  /* ---------- FINAL CTA ---------- */
+  .final-cta {
+    background: var(--chalk);
+    padding: 5rem 6vw;
+    text-align: center;
+  }
+  .final-cta h2 {
+    font-family: var(--display);
+    font-size: 2rem;
+    max-width: 600px;
+    margin: 0 auto 1rem auto;
+  }
+  .final-cta p { color: #3A4A63; max-width: 480px; margin: 0 auto 2rem auto; }
+
+  footer {
+    background: var(--navy-deep);
+    color: #6A7FA0;
+    text-align: center;
+    padding: 1.5rem;
+    font-family: var(--mono);
+    font-size: 0.75rem;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<section class="hero">
+  <div class="fabric-fan" aria-hidden="true"></div>
+  <div class="hero-grid-overlay" aria-hidden="true"></div>
+  <div class="hero-content">
+    <div class="eyebrow">Pattern Drafting &amp; Nesting Agent</div>
+    <h1>From measurements to <em>cutting layout</em>, with proof of the fabric you save.</h1>
+    <p class="hero-sub">
+      Enter a client's measurements and a style. Get a real, sized pattern
+      and a nested cutting layout, with the actual waste percentage
+      against a naive layout, not a guess.
+    </p>
+    <div class="cta-row">
+      <a href="#demo" class="btn btn-primary">Run the demo</a>
+      <a href="#okx" class="btn btn-ghost">View on OKX.AI Marketplace</a>
+    </div>
+  </div>
+</section>
+
+<section class="how">
+  <div class="step">
+    <div class="step-num">01 / Measurements</div>
+    <h3>Body measurements in</h3>
+    <p>Bust or chest, waist, hip, shoulder, and length inputs, the same numbers a tailor already takes by hand.</p>
+  </div>
+  <div class="step">
+    <div class="step-num">02 / Draft</div>
+    <h3>A real, sized pattern out</h3>
+    <p>Standard drafting formulas generate bodice, skirt, or shirt pieces scaled to those exact measurements, with correct grainlines.</p>
+  </div>
+  <div class="step">
+    <div class="step-num">03 / Nest</div>
+    <h3>A cutting layout that proves its savings</h3>
+    <p>Pieces are packed onto your fabric width, grain-constrained, with a waste percentage measured against an unoptimized layout.</p>
+  </div>
+</section>
+
+<section class="demo" id="demo">
+  <div class="demo-inner">
+    <h2>Try it</h2>
+    <p class="demo-sub">
+      This calls the actual drafting and nesting engine, no canned output.
+      Requires the backend running locally (see README) at
+      <code>localhost:5000</code>.
+    </p>
+    <div class="demo-grid">
+      <form class="form-card" id="demo-form">
+        <div class="field">
+          <label for="style">Style</label>
+          <select id="style" name="style">
+            <option value="bodice_aline">Women's Bodice + A-Line Skirt</option>
+            <option value="bodice_straight">Women's Bodice + Straight Skirt</option>
+            <option value="mens_shirt">Men's Standard Shirt</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="bust_or_chest">Bust / Chest (cm)</label>
+          <input type="number" id="bust_or_chest" value="86" required>
+        </div>
+        <div class="field">
+          <label for="waist">Waist (cm)</label>
+          <input type="number" id="waist" value="68" required>
+        </div>
+        <div class="field" id="hip-field">
+          <label for="hip">Hip (cm)</label>
+          <input type="number" id="hip" value="94">
+        </div>
+        <div class="field" id="shoulder-field">
+          <label for="shoulder_width">Shoulder Width (cm)</label>
+          <input type="number" id="shoulder_width" placeholder="auto if left blank">
+        </div>
+        <div class="field" id="back-length-field">
+          <label for="back_length">Back Length, Nape to Waist (cm)</label>
+          <input type="number" id="back_length" value="40">
+        </div>
+        <div class="field" id="skirt-length-field">
+          <label for="skirt_length">Skirt Length (cm)</label>
+          <input type="number" id="skirt_length" value="55">
+        </div>
+        <div class="field" id="sleeve-length-field" style="display:none;">
+          <label for="sleeve_length">Sleeve Length (cm)</label>
+          <input type="number" id="sleeve_length" value="58">
+        </div>
+        <div class="field" id="shirt-length-field" style="display:none;">
+          <label for="shirt_length">Shirt Length (cm)</label>
+          <input type="number" id="shirt_length" value="70">
+        </div>
+        <div class="field">
+          <label for="fabric_width">Fabric Width (cm)</label>
+          <input type="number" id="fabric_width" value="112" required>
+        </div>
+        <button type="submit" class="btn btn-primary run-btn">Generate pattern &amp; layout</button>
+      </form>
+
+      <div class="results">
+        <div class="result-card">
+          <h4>Pattern Pieces</h4>
+          <div id="pattern-output"><div class="placeholder">Run the demo to see the drafted pieces</div></div>
+        </div>
+        <div class="result-card">
+          <h4>Nested Cutting Layout</h4>
+          <div id="layout-output"><div class="placeholder">Run the demo to see the cutting layout</div></div>
+          <div class="stat-row" id="stat-row" style="display:none;">
+            <div class="stat"><span class="num" id="stat-length">–</span><span class="label">cm fabric used</span></div>
+            <div class="stat"><span class="num" id="stat-waste">–</span><span class="label">% waste</span></div>
+            <div class="stat"><span class="num" id="stat-saved">–</span><span class="label">% shorter than naive</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="final-cta" id="okx">
+  <h2>List this agent where the work already happens.</h2>
+  <p>Deploy on the OKX.AI Agent Marketplace, pay-per-call pricing, escrow for full jobs, and an onchain track record that speaks for itself.</p>
+  <a href="https://web3.okx.com/xlayer" class="btn btn-primary" target="_blank" rel="noopener">Go to OKX.AI Marketplace</a>
+</section>
+
+<footer>Cut Line — v1 demo. Pattern geometry requires sign-off from a qualified patternmaker before use on a real client garment.</footer>
+
+<script>
+const API_BASE = "http://localhost:5000";
+
+document.getElementById("style").addEventListener("change", (e) => {
+  const isMensShirt = e.target.value === "mens_shirt";
+  document.getElementById("hip-field").style.display = isMensShirt ? "none" : "block";
+  document.getElementById("back-length-field").style.display = isMensShirt ? "none" : "block";
+  document.getElementById("skirt-length-field").style.display = isMensShirt ? "none" : "block";
+  document.getElementById("sleeve-length-field").style.display = isMensShirt ? "block" : "none";
+  document.getElementById("shirt-length-field").style.display = isMensShirt ? "block" : "none";
+});
+
+document.getElementById("demo-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = e.target.querySelector("button");
+  const originalText = btn.textContent;
+  btn.textContent = "Running...";
+  btn.disabled = true;
+
+  const style = document.getElementById("style").value;
+  const shoulderVal = document.getElementById("shoulder_width").value;
+
+  const payload = {
+    style: style,
+    bust_or_chest: document.getElementById("bust_or_chest").value,
+    waist: document.getElementById("waist").value,
+    hip: document.getElementById("hip").value,
+    fabric_width_cm: document.getElementById("fabric_width").value,
+    shoulder_width: shoulderVal ? shoulderVal : undefined,
+    back_length: document.getElementById("back_length").value,
+    skirt_length: document.getElementById("skirt_length").value,
+    sleeve_length: document.getElementById("sleeve_length").value,
+    shirt_length: document.getElementById("shirt_length").value,
+  };
+
+  try {
+    const res = await fetch(`${API_BASE}/api/pattern`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+
+    if (!data.ok) {
+      document.getElementById("pattern-output").innerHTML =
+        `<div class="error-box">${data.error}</div>`;
+      return;
+    }
+
+    document.getElementById("pattern-output").innerHTML = data.pattern_svg;
+    document.getElementById("layout-output").innerHTML = data.layout_svg;
+    document.getElementById("stat-row").style.display = "flex";
+    document.getElementById("stat-length").textContent = data.nested.fabric_length_used_cm;
+    document.getElementById("stat-waste").textContent = data.nested.waste_pct;
+    document.getElementById("stat-saved").textContent = data.fabric_saved_pct;
+  } catch (err) {
+    document.getElementById("pattern-output").innerHTML =
+      `<div class="error-box">Could not reach the backend at ${API_BASE}. ` +
+      `Make sure api.py is running locally (see README).</div>`;
+  } finally {
+    btn.textContent = originalText;
+    btn.disabled = false;
+  }
+});
+</script>
+
+</body>
+</html>
