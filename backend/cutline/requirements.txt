@@ -8,6 +8,7 @@ pydantic>=2.8
 pydantic-settings>=2.4
 python-dotenv>=1.0
 httpx>=0.27
+sqlalchemy>=2.0
 
 # Geometry & Export
 ezdxf>=1.3
