@@ -293,6 +293,19 @@
     border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink);
   }
   .demo-form .full{grid-column:1/-1;}
+  .demo-freetext{margin-bottom:22px;}
+  .demo-freetext textarea{
+    width:100%;font-family:'IBM Plex Sans',sans-serif;font-size:.9rem;padding:10px 12px;
+    border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink);
+    resize:vertical;min-height:64px;box-sizing:border-box;
+  }
+  .demo-freetext-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px;}
+  .demo-freetext-row button{
+    font-family:'IBM Plex Mono',monospace;font-size:.78rem;padding:8px 14px;
+    border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer;
+  }
+  .demo-freetext-status{font-family:'IBM Plex Mono',monospace;font-size:.78rem;color:var(--ink-soft);}
+  .demo-freetext-status.err{color:var(--rose-deep);}
   .demo-actions{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:24px;}
   .demo-status{font-family:'IBM Plex Mono',monospace;font-size:.8rem;color:var(--ink-soft);}
   .demo-status.err{color:var(--rose-deep);}
@@ -517,6 +530,17 @@
               <span id="apiKeyStatus"></span>
             </div>
 
+            <div class="demo-freetext">
+              <label for="freeText" style="font-size:.82rem;color:var(--ink-soft);font-weight:500;">
+                Paste your measurements as plain text and let Stitchfren do the rest
+              </label>
+              <textarea id="freeText" placeholder="I'm about 92 up top, waist sits around 74, and my hip is roughly 98"></textarea>
+              <div class="demo-freetext-row">
+                <button id="freeTextParse" type="button">Fill in fields from text</button>
+                <span id="freeTextStatus" class="demo-freetext-status"></span>
+              </div>
+            </div>
+
             <form id="demoForm" class="demo-form">
               <label>Style
                 <select id="fStyle">
@@ -641,9 +665,9 @@
 <script>
 (function(){
   // ---------- Backend wiring for the live demo ----------
-  // Set your deployed FastAPI base URL below (also editable from the UI —
-  // it's saved to localStorage so it persists across visits). Example:
-  // "https://stitchfren-production.up.railway.app"
+  // Deployed FastAPI base URL. Still editable from the UI and overridden by
+  // localStorage if a visitor sets their own, but this is what everyone gets
+  // by default.
   const DEFAULT_API_BASE = "https://stitchfren-production.up.railway.app";
 
   const placeholder = document.getElementById('demoPlaceholder');
@@ -659,6 +683,9 @@
   const layoutSvgEl = document.getElementById('demoLayoutSvg');
   const cutSheetEl = document.getElementById('demoCutSheet');
   const dxfEl = document.getElementById('demoDxf');
+  const freeTextArea = document.getElementById('freeText');
+  const freeTextBtn = document.getElementById('freeTextParse');
+  const freeTextStatusEl = document.getElementById('freeTextStatus');
 
   function getApiBase(){
     return localStorage.getItem('stitchfren_api_base') || DEFAULT_API_BASE;
@@ -692,6 +719,42 @@
     if(!v) return;
     setApiBase(v);
     refreshDemoMode();
+  });
+
+  // Optional free-text measurement entry. Calls /api/parse-text (LLM with a
+  // rule-based fallback server-side) and fills in whichever of the existing
+  // bust/waist/hip fields the parser found. Never touches Style, fabric
+  // width, or seam allowance, and never blocks the normal structured-form
+  // submit flow below.
+  freeTextBtn.addEventListener('click', async function(){
+    const text = freeTextArea.value.trim();
+    const base = getApiBase();
+    if(!base){ freeTextStatusEl.textContent = 'Set the API endpoint above first.'; freeTextStatusEl.classList.add('err'); return; }
+    if(!text){ freeTextStatusEl.textContent = 'Paste some measurements first.'; freeTextStatusEl.classList.add('err'); return; }
+    freeTextStatusEl.classList.remove('err');
+    freeTextStatusEl.textContent = 'Parsing…';
+    freeTextBtn.disabled = true;
+    try{
+      const res = await fetch(base + '/api/parse-text', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
+      });
+      const data = await res.json();
+      if(!res.ok || !data.ok){
+        throw new Error(data.detail || 'Could not parse that text.');
+      }
+      const d = data.data || {};
+      if(typeof d.bust_or_chest === 'number') document.getElementById('fBust').value = d.bust_or_chest;
+      if(typeof d.waist === 'number') document.getElementById('fWaist').value = d.waist;
+      if(typeof d.hip === 'number') document.getElementById('fHip').value = d.hip;
+      freeTextStatusEl.textContent = 'Filled in from ' + (data.source === 'llm' ? 'AI parsing' : 'text') + '. Review below, then submit.';
+    } catch(err){
+      freeTextStatusEl.textContent = err.message;
+      freeTextStatusEl.classList.add('err');
+    } finally {
+      freeTextBtn.disabled = false;
+    }
   });
 
   async function ensureApiKey(base){
