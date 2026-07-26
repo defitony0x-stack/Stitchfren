@@ -66,9 +66,39 @@ Pages, or served by the backend itself).
 
 Node/Express service exposing the one real job this backend does —
 draft + nest + export + cutting sheet — as a single x402-gated route,
-`POST /mcp/draft-and-nest`, for OKX's A2MCP (pay-per-call) listing mode.
-Deploys as its own service, separate from `cutline`'s Python deploy
-(different runtime, different Railway/host service).
+`POST /mcp/draft-and-nest`, for OKX's A2MCP (**a**gent-**t**o-**a**gent,
+pay-per-call) listing mode. An agent on OKX AI calls this route directly,
+no human in the loop — that's what A2MCP means: one agent paying another
+agent for a completed task. Deploys as its own service, separate from
+`cutline`'s Python deploy (different runtime, different Railway/host
+service).
+
+**Response shape.** Every completed job — whether returned immediately
+from `/mcp/draft-and-nest` or fetched later from `/mcp/status/:taskId` —
+comes back with a plain-language `message` and a `download_url` up front,
+not just raw geometry:
+
+```json
+{
+  "ok": true,
+  "task_id": "...",
+  "message": "Your bodice — a-line pattern is ready. Cut 6 pieces using 210cm of fabric, 12cm less than a naive layout...",
+  "download_url": "https://.../stitchfren_....dxf",
+  "fabric_saved_cm": 12.4,
+  "fabric_saved_pct": 5.6,
+  "cutting_sheet": { ... },
+  "result": { ... }
+}
+```
+
+`message` is the backend's own LLM-written narrative
+(`cutting_sheet.narrative`, from `app/services/llm_service.py`) when
+`LLM_API_KEY` is configured on the `cutline` backend; if it isn't (or the
+call fails), the gateway falls back to a templated sentence built from the
+same facts, so an agent always gets a human-readable direction alongside
+the link, never just a bare JSON blob. The full structured `result` still
+rides along underneath for agents that want to parse geometry
+programmatically.
 
 ### Setup
 
@@ -85,7 +115,7 @@ npm start
 | `PAY_TO_ADDRESS` | Your Agentic Wallet / payout address on X Layer |
 | `STITCHFREN_API_BASE` | Your deployed `cutline` backend URL |
 | `STITCHFREN_SERVICE_KEY` | An API key generated once via `cutline`'s `POST /api/keys/generate`, used server-to-server by the gateway |
-| `STITCHFREN_PRICE` | Optional — overrides the default `$0.15` per job |
+| `STITCHFREN_PRICE` | Optional — overrides the default `$0.50` per job |
 
 Until the OKX env vars are set, the gateway logs a warning and runs
 **without payment gating** — fine for local testing, not for pointing
@@ -100,10 +130,13 @@ can do for you.
 
 ## Open items worth deciding before launch
 
-- **Pricing**: `$0.15` per job is a placeholder — you know your margins
+- **Pricing**: `$0.50` per job — you know your margins
   and what competing ASPs charge better than I do.
-- **`@x402/*` package versions** in `backend/mcp-gateway/package.json` are
-  placeholders — check npm for current versions before `npm install`.
+- **`@x402/*` package versions**: pinned to versions confirmed against npm
+  (`@x402/core` 2.3.0, `@x402/evm` 2.9.0). `@x402/express`'s exact current
+  number wasn't independently confirmed — pinned to `^2.3.0` as a
+  reasonable match to `@x402/core`; double check on npm before relying on
+  it.
 - **Auth header contract**: `signOkx()` in `backend/mcp-gateway/server.js`
   is carried over from your reference file unverified — do one real paid
   call against OKX's facilitator in staging before trusting it live.
