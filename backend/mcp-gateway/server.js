@@ -53,21 +53,34 @@ function paymentIsConfigured() {
 // app/workers/tasks.py in the backend, which always runs these together).
 export const PRICE = process.env.STITCHFREN_PRICE || "$0.50";
 
+// Verified against OKX's published Onchain OS x402 API reference
+// (web3.okx.com/onchainos/dev-docs/payments/api-http-onetime, fetched
+// 2026-07-27). Prehash formula (timestamp+method+requestPath+body,
+// HMAC-SHA256, base64) and the four auth headers match exactly.
+// Content-Type is listed as a required header for POST requests in
+// OKX's own auth table and was missing before - added below.
 function signOkx(method, requestPath, body = "") {
   const timestamp = new Date().toISOString();
   const prehash = `${timestamp}${method.toUpperCase()}${requestPath}${body}`;
   const sign = crypto.createHmac("sha256", process.env.OKX_SECRET_KEY).update(prehash).digest("base64");
-  return {
+  const headers = {
     "OK-ACCESS-KEY": process.env.OKX_API_KEY,
     "OK-ACCESS-SIGN": sign,
     "OK-ACCESS-TIMESTAMP": timestamp,
     "OK-ACCESS-PASSPHRASE": process.env.OKX_PASSPHRASE,
   };
+  if (method.toUpperCase() === "POST") {
+    headers["Content-Type"] = "application/json";
+  }
+  return headers;
 }
 
 // OKX wraps every REST response (including the x402 facilitator) in
-// {"code":0,"data":{...}}. @x402/core's facilitator client expects the
-// unwrapped payload. Scoped narrowly to facilitator-URL calls only.
+// {"code":"0","msg":"...","data":{...}} - code is a string per OKX's
+// docs, not an int as the old comment here said, though the unwrap
+// check below is type-agnostic so this never actually broke anything.
+// @x402/core's facilitator client expects the unwrapped payload.
+// Scoped narrowly to facilitator-URL calls only.
 function installFacilitatorEnvelopeUnwrap() {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
@@ -103,11 +116,15 @@ async function buildPaymentMiddleware() {
 
   const facilitatorClient = new HTTPFacilitatorClient({
     url: FACILITATOR_URL,
+    // Only verify/settle/supported: those are the only three methods on
+    // @x402/core's FacilitatorClient interface, and the only endpoints
+    // OKX documents (plus settle/status, which this SDK version doesn't
+    // call). The old 'list' entry pointed at an endpoint that doesn't
+    // exist - /api/v6/pay/x402/list is not in OKX's API reference.
     createAuthHeaders: async () => ({
       verify: signOkx("POST", "/api/v6/pay/x402/verify"),
       settle: signOkx("POST", "/api/v6/pay/x402/settle"),
       supported: signOkx("GET", "/api/v6/pay/x402/supported"),
-      list: signOkx("GET", "/api/v6/pay/x402/list"),
     }),
   });
 
