@@ -169,7 +169,16 @@ class X402Gate:
             if not replayed:
                 replayed = True
                 return {"type": "http.request", "body": body, "more_body": False}
-            return {"type": "http.disconnect"}
+            # Body's already fully drained above, so anything the app asks
+            # for after this is it watching for a REAL disconnect - forward
+            # to the original receive instead of manufacturing one. This
+            # was the actual bug: hardcoding {"type": "http.disconnect"}
+            # here made fastmcp's Streamable HTTP transport think the
+            # client had gone away mid-response, so it accepted the
+            # initialize/tools handshake (headers + session id already
+            # sent) and then aborted before writing any body - the exact
+            # "200 with an empty body" failure the OKX-side probe found.
+            return await receive()
 
         if _paid_tool_call(body):
             headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
