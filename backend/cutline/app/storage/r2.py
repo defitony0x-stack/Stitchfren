@@ -56,17 +56,12 @@ def is_configured() -> bool:
     return _get_client() is not None
 
 
-def upload_dxf(local_path: str, key_prefix: str = "dxf") -> Optional[str]:
+def upload_file(local_path: str, key_prefix: str, content_type: str) -> Optional[str]:
     """
-    Uploads a local DXF file to R2 and returns a URL for it, or None if R2
-    isn't configured.
-
-    Two modes, controlled by env vars:
-      - R2_PUBLIC_URL set (e.g. a custom domain or r2.dev public bucket URL):
-        returns a permanent public URL. Use this if the bucket is public.
-      - R2_PUBLIC_URL not set: returns a presigned URL valid for
-        R2_PRESIGNED_EXPIRY_SECONDS (default 7 days). Use this for a
-        private bucket, which is the safer default.
+    Uploads any local file to R2 under key_prefix/ and returns a URL for it,
+    or None if R2 isn't configured. Shared by upload_dxf and upload_svg -
+    same public/presigned URL logic either way, only the content type and
+    key prefix differ.
     """
     client = _get_client()
     if client is None:
@@ -86,7 +81,7 @@ def upload_dxf(local_path: str, key_prefix: str = "dxf") -> Optional[str]:
         local_path,
         bucket,
         object_key,
-        ExtraArgs={"ContentType": "application/dxf"},
+        ExtraArgs={"ContentType": content_type},
     )
 
     public_base = os.getenv("R2_PUBLIC_URL")
@@ -99,3 +94,27 @@ def upload_dxf(local_path: str, key_prefix: str = "dxf") -> Optional[str]:
         Params={"Bucket": bucket, "Key": object_key},
         ExpiresIn=expiry,
     )
+
+
+def upload_dxf(local_path: str, key_prefix: str = "dxf") -> Optional[str]:
+    """
+    Uploads a local DXF file to R2 and returns a URL for it, or None if R2
+    isn't configured.
+
+    Two modes, controlled by env vars:
+      - R2_PUBLIC_URL set (e.g. a custom domain or r2.dev public bucket URL):
+        returns a permanent public URL. Use this if the bucket is public.
+      - R2_PUBLIC_URL not set: returns a presigned URL valid for
+        R2_PRESIGNED_EXPIRY_SECONDS (default 7 days). Use this for a
+        private bucket, which is the safer default.
+    """
+    return upload_file(local_path, key_prefix, "application/dxf")
+
+
+def upload_svg(local_path: str, key_prefix: str = "svg") -> Optional[str]:
+    """
+    Same as upload_dxf but for a pattern/layout SVG - added so the MCP
+    tool's response can hand back real download links for the SVGs, not
+    just inline markup. Same public/presigned URL behavior as upload_dxf.
+    """
+    return upload_file(local_path, key_prefix, "image/svg+xml")
