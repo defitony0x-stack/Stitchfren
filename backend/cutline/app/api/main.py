@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import hashlib
 import json
+from contextlib import asynccontextmanager
 from typing import Optional
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +27,23 @@ from app.core.security import get_current_key
 from app.services.llm_service import enhance_with_llm, parse_measurements_from_text
 from app.db.database import get_db, init_db
 from sqlalchemy.orm import Session
+from app.mcp.server import mcp_app, mcp_app_gated
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # No real Alembic migrations wired up yet - see app/db/database.py
+    # init_db() for the caveat. This is what makes a fresh deploy (e.g. a
+    # brand new Railway Postgres) actually have a jobs/api_keys table to
+    # write to, instead of failing on the first request.
+    init_db()
+    # fastmcp's Streamable HTTP transport needs its own session manager
+    # running for the lifetime of the app (this is what makes /mcp actually
+    # answer instead of 404 - see app/mcp/server.py's module docstring for
+    # why mounting alone isn't enough).
+    async with mcp_app.lifespan(app):
+        yield
+
 
 # Create FastAPI app
 app = FastAPI(
@@ -34,17 +52,12 @@ app = FastAPI(
     version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
-
-@app.on_event("startup")
-def _create_tables_on_startup():
-    # No real Alembic migrations wired up yet - see app/db/database.py
-    # init_db() for the caveat. This is what makes a fresh deploy (e.g. a
-    # brand new Railway Postgres) actually have a jobs/api_keys table to
-    # write to, instead of failing on the first request.
-    init_db()
-
+# Real MCP protocol server (initialize / tools/list / tools/call), x402
+# payment-gated per-call for the one priced tool. See app/mcp/server.py.
+app.mount("/mcp", mcp_app_gated)
 
 app.add_middleware(
     CORSMiddleware,
