@@ -329,6 +329,12 @@
     background:var(--fog);border-radius:12px;padding:16px 18px;white-space:pre-wrap;
   }
   .demo-dxf{margin-top:16px;}
+  .demo-dxf-upsell{
+    margin-top:16px;border-radius:12px;padding:18px 20px;
+    background:var(--fog);border:1px dashed rgba(0,0,0,.15);
+    display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;
+  }
+  .demo-dxf-upsell p{margin:0;font-size:.85rem;max-width:32ch;}
   @media (max-width:900px){
     .demo-form{grid-template-columns:1fr;}
     .demo-result-grid{grid-template-columns:1fr;}
@@ -800,14 +806,15 @@
       ? sheet
       : JSON.stringify(sheet, null, 2);
 
-    if(result.dxf_url){
-      const href = result.dxf_url.startsWith('http')
-        ? result.dxf_url
-        : getApiBase() + result.dxf_url;
-      dxfEl.innerHTML = '<a class="btn btn-ghost" href="' + href + '" target="_blank" rel="noopener">Download DXF</a>';
-    } else {
-      dxfEl.innerHTML = '';
-    }
+    // DXF export is an OKX-marketplace-only feature — the free demo shows
+    // everything except the cut-ready file, with a nudge to buy the full
+    // job there instead of a download link.
+    dxfEl.innerHTML =
+      '<div class="demo-dxf-upsell">' +
+        '<p>Want the real-scale, cut-ready DXF for this layout? ' +
+        'DXF export ships with the full job on the OKX Agent Marketplace.</p>' +
+        '<a class="btn btn-primary" href="#okx">Get the full package on OKX</a>' +
+      '</div>';
   }
 
   submitBtn.addEventListener('click', async function(){
