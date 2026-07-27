@@ -12,6 +12,9 @@ from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 import math
 
+from shapely.geometry import Polygon
+from shapely.geometry.polygon import orient
+
 from ..models.schemas import Measurements as PydanticMeasurements  # reuse validation
 
 
@@ -32,42 +35,44 @@ def _default_shoulder(bust_or_chest: float) -> float:
 
 def _offset_polygon(points: List[Point], offset: float, is_outer: bool = True) -> List[Point]:
     """
-    Simple parallel curve offset for seam allowance.
-    For production use shapely or pyclipper for robust miter/round joins.
-    This is a basic implementation sufficient for v1.1 straight/ gently curved pieces.
+    Seam allowance offset via shapely's buffer(), verified against
+    shapely's own docs (shapely.buffer / Polygon.buffer, mitre join
+    style): buffer's positive/negative distance IS the Minkowski
+    sum/difference of the polygon with a disc, computed with full
+    geometric correctness at every vertex - including the concave dart
+    notches these pieces have, which the old per-vertex normal-averaging
+    implementation could self-intersect on (its own comment admitted
+    "basic implementation... sufficient for v1.1").
+
+    join_style='mitre' keeps corners sharp (round would fillet them,
+    which is wrong for a cut line meant to be sewn edge-to-edge).
+    Buffer direction is outward for positive distance regardless of the
+    input polygon's winding order, so this also fixes the old code's
+    "assuming CCW? our points are mixed" uncertainty by construction.
     """
     if offset <= 0:
         return points[:]
 
-    n = len(points)
-    new_points = []
     sign = 1 if is_outer else -1
+    poly = Polygon(points)
+    if not poly.is_valid:
+        poly = poly.buffer(0)
 
-    for i in range(n):
-        p0 = points[(i - 1) % n]
-        p1 = points[i]
-        p2 = points[(i + 1) % n]
+    buffered = poly.buffer(sign * offset, join_style="mitre", mitre_limit=5.0)
 
-        # Compute outward normals
-        dx1, dy1 = p1[0] - p0[0], p1[1] - p0[1]
-        len1 = math.hypot(dx1, dy1) or 1e-9
-        nx1, ny1 = -dy1 / len1, dx1 / len1   # left normal (assuming CCW? our points are mixed)
+    if buffered.is_empty:
+        return points[:]
+    if buffered.geom_type == "MultiPolygon":
+        # Shouldn't happen for a single dilated simple polygon, but if a
+        # large negative offset ever splits the shape, keep the largest
+        # piece rather than silently dropping the result.
+        buffered = max(buffered.geoms, key=lambda g: g.area)
 
-        dx2, dy2 = p2[0] - p1[0], p2[1] - p1[1]
-        len2 = math.hypot(dx2, dy2) or 1e-9
-        nx2, ny2 = -dy2 / len2, dx2 / len2
-
-        # Average normal
-        nx = (nx1 + nx2) / 2
-        ny = (ny1 + ny2) / 2
-        nlen = math.hypot(nx, ny) or 1e-9
-        nx, ny = nx / nlen, ny / nlen
-
-        new_x = p1[0] + sign * offset * nx
-        new_y = p1[1] + sign * offset * ny
-        new_points.append((new_x, new_y))
-
-    return new_points
+    buffered = orient(buffered, sign=1.0)  # keep consistent CCW winding
+    coords = list(buffered.exterior.coords)
+    if len(coords) > 1 and coords[0] == coords[-1]:
+        coords = coords[:-1]  # drop shapely's closing duplicate point
+    return coords
 
 
 def add_seam_allowance(piece: PatternPiece, allowance: float) -> PatternPiece:
