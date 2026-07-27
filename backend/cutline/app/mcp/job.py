@@ -94,6 +94,39 @@ async def run_pattern_job(request: PatternRequest, request_data: Dict[str, Any] 
     except Exception:
         dxf_url = None
 
+    # 4b. SVGs - same idea as the DXF above: upload to R2 so the response
+    # can carry real download links, not just inline markup. pattern_svg/
+    # layout_svg keep returning the raw markup too (existing consumers,
+    # e.g. inline demo previews, still get that unchanged) - these _url
+    # fields are additive.
+    file_hash = hashlib.md5(json.dumps(request_data, sort_keys=True).encode()).hexdigest()[:10]
+    pattern_svg_url = None
+    layout_svg_url = None
+    if r2.is_configured():
+        for svg_content, kind, target in (
+            (pattern_svg, "pattern", "pattern_svg_url"),
+            (layout_svg, "layout", "layout_svg_url"),
+        ):
+            svg_filename = f"/tmp/stitchfren_{kind}_{file_hash}.svg"
+            try:
+                # Explicit UTF-8: cutting-sheet text (and this SVG content)
+                # can carry non-ASCII characters (degree signs, dashes, an
+                # LLM narrative). Without pinning encoding, a server whose
+                # default locale isn't UTF-8 raises UnicodeEncodeError here,
+                # which the except below would otherwise swallow silently -
+                # leaving pattern_svg_url/layout_svg_url as None with no
+                # visible error.
+                with open(svg_filename, "w", encoding="utf-8") as f:
+                    f.write(svg_content)
+                url = r2.upload_svg(svg_filename)
+                os.remove(svg_filename)
+                if target == "pattern_svg_url":
+                    pattern_svg_url = url
+                else:
+                    layout_svg_url = url
+            except Exception:
+                pass
+
     result_hash = hashlib.sha256(json.dumps(request_data, sort_keys=True).encode()).hexdigest()[:16]
 
     # 5. Cutting sheet (rule-based, + LLM narrative if LLM_API_KEY is set)
@@ -109,6 +142,8 @@ async def run_pattern_job(request: PatternRequest, request_data: Dict[str, Any] 
         "ok": True,
         "pattern_svg": pattern_svg,
         "layout_svg": layout_svg,
+        "pattern_svg_url": pattern_svg_url,
+        "layout_svg_url": layout_svg_url,
         "nested": nested.model_dump(),
         "naive": naive.model_dump(),
         "fabric_saved_cm": fabric_saved_cm,
