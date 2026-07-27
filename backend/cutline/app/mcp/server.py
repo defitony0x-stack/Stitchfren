@@ -29,6 +29,7 @@ Design decisions, and why:
 
 from __future__ import annotations
 
+import base64
 import json
 from typing import Any, Dict, Optional
 
@@ -94,6 +95,8 @@ async def draft_and_nest_pattern(
         "ok": True,
         "message": message,
         "download_url": result.get("dxf_url"),
+        "pattern_svg_url": result.get("pattern_svg_url"),
+        "layout_svg_url": result.get("layout_svg_url"),
         "fabric_saved_cm": result.get("fabric_saved_cm"),
         "fabric_saved_pct": result.get("fabric_saved_pct"),
         "warnings": result.get("warnings", []),
@@ -199,12 +202,19 @@ class X402Gate:
 async def _send_402(send, resource_url: str, error: str) -> None:
     body_dict = payment_required_body(resource_url, error)
     body = json.dumps(body_dict).encode()
+    # The x402 v2 HTTP transport spec has PAYMENT-REQUIRED carry a
+    # base64-encoded copy of the same object the body already has in plain
+    # JSON. The body stays plain JSON for any client that just reads the
+    # response body (which is all that mattered for the real test so far);
+    # the header is there for clients that read x402 state from headers
+    # only, per spec, and needs to be base64 to match what they expect.
+    header_value = base64.b64encode(body).decode()
     await send({
         "type": "http.response.start",
         "status": 402,
         "headers": [
             (b"content-type", b"application/json"),
-            (b"payment-required", json.dumps(body_dict).encode()),
+            (b"payment-required", header_value.encode()),
         ],
     })
     await send({"type": "http.response.body", "body": body})
