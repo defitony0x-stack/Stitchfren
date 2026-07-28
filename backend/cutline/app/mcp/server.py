@@ -133,6 +133,49 @@ def _paid_tool_call(body: bytes) -> bool:
     return params.get("name") == "draft_and_nest_pattern"
 
 
+class AcceptFixer:
+    """fastmcp's Streamable HTTP transport answers HTTP 406 ("Client must
+    accept both application/json and text/event-stream") to any request whose
+    Accept header lacks `text/event-stream`. Some clients and automated
+    checkers (including OKX's x402 endpoint validator) don't send that
+    header, so they get a 406 and the endpoint reads as "invalid" even though
+    the MCP server is healthy and a real paid call works fine.
+
+    This thin ASGI wrapper rewrites the Accept header to include
+    `text/event-stream` before fastmcp sees the request, so those probes get
+    a genuine MCP response (200) instead of a 406. A real buyer client already
+    sends the header, so its flow is unchanged. The X402Gate still runs first
+    and returns the 402 challenge on an unpaid priced call, so payment gating
+    is unaffected.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http":
+            new_headers = []
+            had_accept = False
+            for k, v in scope.get("headers", []):
+                if k.lower() == b"accept":
+                    had_accept = True
+                    # fastmcp's Accept check requires BOTH `application/json`
+                    # and `text/event-stream` to be present (it uses
+                    # startswith() on each, so a bare `*/*` is not enough).
+                    # Normalize to exactly those two so any client or
+                    # automated checker (incl. OKX's x402 endpoint validator,
+                    # which sends no SSE Accept header) gets a real MCP
+                    # response instead of HTTP 406 "Not Acceptable".
+                    new_headers.append((k, b"application/json, text/event-stream"))
+                else:
+                    new_headers.append((k, v))
+            if not had_accept:
+                new_headers.append((b"accept", b"application/json, text/event-stream"))
+            scope = dict(scope)
+            scope["headers"] = new_headers
+        await self.app(scope, receive, send)
+
+
 class X402Gate:
     """
     Thin ASGI wrapper around mcp_app. Buffers the POST body (ASGI bodies can
@@ -220,4 +263,6 @@ async def _send_402(send, resource_url: str, error: str) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
-mcp_app_gated = X402Gate(mcp_app)
+# AcceptFixer runs first so fastmcp never 406s on headers; X402Gate then
+# applies the 402 challenge on an unpaid priced call.
+mcp_app_gated = X402Gate(AcceptFixer(mcp_app))
