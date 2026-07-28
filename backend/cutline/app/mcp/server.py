@@ -20,11 +20,20 @@ Design decisions, and why:
   app/api/main.py's /api/pattern + /api/status are untouched, for the
   existing frontend demo and any other direct REST caller.
 - Payment gating happens in X402Gate below, NOT inside the tool function.
-  It only challenges an actual tools/call for draft_and_nest_pattern -
-  initialize and tools/list stay free, because a buyer's agent (and OKX's
-  own listing/evaluator) needs to discover the tool and its schema before
-  it can ever construct a payment for it. Gating the whole /mcp path would
-  make the server fail its own discovery handshake.
+  Two distinct jobs:
+    (a) Discovery stays free for *real* buyer agents: `initialize` (which has
+        no session yet) and any in-session request pass straight through, so a
+        client can discover the tool and its schema before it ever constructs
+        a payment.
+    (b) x402-compliance for *automated checkers*: OKX's x402 endpoint
+        validator probes the resource and expects a 402 challenge on any
+        request that is not a valid, in-session MCP handshake. A sessionless
+        non-initialize request would otherwise fall through to fastmcp and
+        come back as HTTP 400 "Missing session ID", which the validator reads
+        as "not a valid x402 service" (the exact failure: `x402-check`
+        reported "Endpoint returned HTTP 400 (not 402)"). We arm the 402 on
+        that path instead, so the validator sees a well-formed
+        PaymentRequirements challenge and the endpoint validates.
 """
 
 from __future__ import annotations
@@ -133,6 +142,80 @@ def _paid_tool_call(body: bytes) -> bool:
     return params.get("name") == "draft_and_nest_pattern"
 
 
+async def _read_full_body(receive) -> bytes:
+    """Drain the ASGI request body (it can only be read once)."""
+    chunks = []
+    more_body = True
+    while more_body:
+        message = await receive()
+        chunks.append(message.get("body", b""))
+        more_body = message.get("more_body", False)
+    return b"".join(chunks)
+
+
+def _resource_url(scope, headers: dict) -> str:
+    scheme = "https" if scope.get("scheme") != "http" else "http"
+    host = headers.get("host", "")
+    return f"{scheme}://{host}/mcp"
+
+
+def _default_initialize_params(body: bytes) -> bytes:
+    """
+    OKX's x402 endpoint validator POSTs `initialize` with empty/missing
+    `params`, which fastmcp rejects with JSON-RPC -32602 and surfaces to the
+    checker as HTTP 400. Default the params for a bare initialize so the
+    handshake completes and the endpoint reads as valid. A real MCP client
+    sends full params and is unaffected.
+    """
+    try:
+        parsed = json.loads(body)
+        if (
+            isinstance(parsed, dict)
+            and parsed.get("method") == "initialize"
+            and not parsed.get("params")
+        ):
+            parsed["params"] = {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "okx-check", "version": "1.0"},
+            }
+            return json.dumps(parsed).encode()
+    except Exception:
+        pass
+    return body
+
+
+def _safe_json(body: bytes):
+    try:
+        return json.loads(body)
+    except Exception:
+        return None
+
+
+def _make_replay(receive, body: bytes):
+    """Replay `body` once, then forward to the original `receive`.
+
+    The body is fully drained above, so anything the app asks for after the
+    first read is it watching for a real disconnect - forward to the original
+    receive rather than manufacturing one. This was the actual bug: hardcoding
+    {"type": "http.disconnect"} here made fastmcp's Streamable HTTP transport
+    think the client had gone away mid-response, so it accepted the
+    initialize/tools handshake (headers + session id already sent) and then
+    aborted before writing any body - the exact "200 with an empty body"
+    failure the OKX-side probe found.
+    """
+    replayed = False
+
+    async def replay_receive():
+        nonlocal replayed
+        if not replayed:
+            replayed = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return await receive()
+
+    return replay_receive
+
+
 class AcceptFixer:
     """fastmcp's Streamable HTTP transport answers HTTP 406 ("Client must
     accept both application/json and text/event-stream") to any request whose
@@ -178,12 +261,22 @@ class AcceptFixer:
 
 class X402Gate:
     """
-    Thin ASGI wrapper around mcp_app. Buffers the POST body (ASGI bodies can
-    only be read once, so it has to be replayed to the wrapped app), checks
-    whether this specific call is the priced tool, and if so runs the x402
-    challenge/verify/settle flow from app/mcp/x402.py before letting the
-    request through. Everything else (GET for the SSE stream, initialize,
-    tools/list) passes straight through untouched.
+    Thin ASGI wrapper around mcp_app. Handles three cases, in order:
+
+    1. Non-POST (e.g. the SSE GET stream): if it carries an `mcp-session-id`
+       it is a real client and passes through; otherwise it is a probe and
+       gets the 402 challenge.
+    2. POST `initialize`: the first handshake, which has no session yet. It
+       must stay free so discovery works, so it passes through.
+    3. Any other POST without a session: a probe (incl. OKX's x402 validator
+       hitting tools/list / tools/call / a bare body without first
+       establishing a session). Arm the 402 challenge here instead of letting
+       fastmcp return HTTP 400 "Missing session ID", which the validator
+       reads as "not a valid x402 service".
+    4. A real, in-session POST: if it is the priced tool `draft_and_nest_pattern`
+       without a valid `X-PAYMENT` header, challenge it with 402; with a valid
+       header, verify & settle before letting the call run. Everything else
+       passes through.
 
     NOTE: only handles a single, non-batched JSON-RPC request per POST body
     - the common case for a tools/call. A batched-array request smuggling a
@@ -196,63 +289,43 @@ class X402Gate:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope["method"] != "POST":
+        if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
-        body_chunks = []
-        more_body = True
-        while more_body:
-            message = await receive()
-            body_chunks.append(message.get("body", b""))
-            more_body = message.get("more_body", False)
-        body = b"".join(body_chunks)
+        headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+        has_session = "mcp-session-id" in headers
+        resource_url = _resource_url(scope, headers)
 
-        # Some automated checkers (incl. OKX's x402 endpoint validator) POST
-        # an `initialize` with empty/missing `params`, which fastmcp rejects
-        # with JSON-RPC -32602 ("Invalid request parameters") and surfaces to
-        # the checker as HTTP 400. Default the params for a bare initialize so
-        # the handshake completes and the endpoint reads as valid. A real MCP
-        # client sends full params and is unaffected.
-        try:
-            parsed = json.loads(body)
-            if (
-                isinstance(parsed, dict)
-                and parsed.get("method") == "initialize"
-                and not parsed.get("params")
-            ):
-                parsed["params"] = {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "okx-check", "version": "1.0"},
-                }
-                body = json.dumps(parsed).encode()
-        except Exception:
-            pass
+        # --- Non-POST (SSE stream) ---
+        if scope.get("method") != "POST":
+            if not has_session:
+                await _send_402(send, resource_url, "Payment required to access this MCP service")
+                return
+            await self.app(scope, receive, send)
+            return
 
-        replayed = False
+        # --- POST: buffer the body so we can both inspect and replay it ---
+        body = await _read_full_body(receive)
+        # OKX's validator POSTs `initialize` with empty/missing params; default
+        # them so the handshake completes and the endpoint reads as healthy.
+        body = _default_initialize_params(body)
+        parsed = _safe_json(body)
+        rpc_method = parsed.get("method") if isinstance(parsed, dict) else None
 
-        async def replay_receive():
-            nonlocal replayed
-            if not replayed:
-                replayed = True
-                return {"type": "http.request", "body": body, "more_body": False}
-            # Body's already fully drained above, so anything the app asks
-            # for after this is it watching for a REAL disconnect - forward
-            # to the original receive instead of manufacturing one. This
-            # was the actual bug: hardcoding {"type": "http.disconnect"}
-            # here made fastmcp's Streamable HTTP transport think the
-            # client had gone away mid-response, so it accepted the
-            # initialize/tools handshake (headers + session id already
-            # sent) and then aborted before writing any body - the exact
-            # "200 with an empty body" failure the OKX-side probe found.
-            return await receive()
+        # `initialize` is the first handshake and has no session yet; it must
+        # stay free so discovery works. Anything else without a session is a
+        # probe and gets the 402 challenge.
+        if rpc_method == "initialize":
+            await self.app(scope, _make_replay(receive, body), send)
+            return
+        if not has_session:
+            await _send_402(send, resource_url, "Payment required to access this MCP service")
+            return
 
+        # Real, in-session request from here on.
         if _paid_tool_call(body):
-            headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
             x_payment = headers.get("x-payment")
-            resource_url = f"{'https' if scope.get('scheme') != 'http' else 'http'}://{headers.get('host', '')}/mcp"
-
             try:
                 if not x_payment:
                     raise PaymentError("X-PAYMENT header is required")
@@ -261,7 +334,7 @@ class X402Gate:
                 await _send_402(send, resource_url, str(exc))
                 return
 
-        await self.app(scope, replay_receive, send)
+        await self.app(scope, _make_replay(receive, body), send)
 
 
 async def _send_402(send, resource_url: str, error: str) -> None:
@@ -286,5 +359,6 @@ async def _send_402(send, resource_url: str, error: str) -> None:
 
 
 # AcceptFixer runs first so fastmcp never 406s on headers; X402Gate then
-# applies the 402 challenge on an unpaid priced call.
+# applies the 402 challenge on an unpaid priced call (or on a sessionless
+# probe, so automated x402 checkers see a valid challenge).
 mcp_app_gated = X402Gate(AcceptFixer(mcp_app))
