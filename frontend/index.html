@@ -763,8 +763,8 @@
     }
   });
 
-  async function ensureApiKey(base){
-    let key = getApiKey();
+  async function ensureApiKey(base, forceFresh){
+    let key = forceFresh ? null : getApiKey();
     if(key) return key;
     const res = await fetch(base + '/api/keys/generate', { method: 'POST' });
     if(!res.ok) throw new Error('Could not obtain a demo API key (' + res.status + ')');
@@ -817,6 +817,31 @@
       '</div>';
   }
 
+  async function submitJob(base, payload, forceFreshKey){
+    const key = await ensureApiKey(base, forceFreshKey);
+    apiKeyStatus.textContent = '· key ready';
+
+    statusEl.textContent = 'Submitting job…';
+    const res = await fetch(base + '/api/pattern', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': key },
+      body: JSON.stringify(payload)
+    });
+
+    if(res.status === 401 && !forceFreshKey){
+      // The cached key (from a previous visit/session) is no longer valid
+      // against the backend - e.g. it was reset by a redeploy. Clear it and
+      // get a fresh one instead of failing forever in this browser.
+      statusEl.textContent = 'Refreshing demo key…';
+      return submitJob(base, payload, true);
+    }
+    if(!res.ok){
+      const detail = await res.text();
+      throw new Error('Submit failed (' + res.status + '): ' + detail);
+    }
+    return res.json();
+  }
+
   submitBtn.addEventListener('click', async function(){
     const base = getApiBase();
     if(!base){ statusEl.textContent = 'Set the API endpoint above first.'; return; }
@@ -839,20 +864,8 @@
     statusEl.textContent = 'Getting API key…';
 
     try{
-      const key = await ensureApiKey(base);
-      apiKeyStatus.textContent = '· key ready';
-
-      statusEl.textContent = 'Submitting job…';
-      const res = await fetch(base + '/api/pattern', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-API-Key': key },
-        body: JSON.stringify(payload)
-      });
-      if(!res.ok){
-        const detail = await res.text();
-        throw new Error('Submit failed (' + res.status + '): ' + detail);
-      }
-      const { task_id } = await res.json();
+      const { task_id } = await submitJob(base, payload, false);
+      const key = getApiKey();
 
       statusEl.textContent = 'Drafting & nesting…';
       const result = await pollStatus(base, key, task_id);
