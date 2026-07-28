@@ -208,6 +208,28 @@ class X402Gate:
             more_body = message.get("more_body", False)
         body = b"".join(body_chunks)
 
+        # Some automated checkers (incl. OKX's x402 endpoint validator) POST
+        # an `initialize` with empty/missing `params`, which fastmcp rejects
+        # with JSON-RPC -32602 ("Invalid request parameters") and surfaces to
+        # the checker as HTTP 400. Default the params for a bare initialize so
+        # the handshake completes and the endpoint reads as valid. A real MCP
+        # client sends full params and is unaffected.
+        try:
+            parsed = json.loads(body)
+            if (
+                isinstance(parsed, dict)
+                and parsed.get("method") == "initialize"
+                and not parsed.get("params")
+            ):
+                parsed["params"] = {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "okx-check", "version": "1.0"},
+                }
+                body = json.dumps(parsed).encode()
+        except Exception:
+            pass
+
         replayed = False
 
         async def replay_receive():
