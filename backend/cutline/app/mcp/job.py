@@ -70,14 +70,30 @@ async def run_pattern_job(
         seam_allowance_cm=request.seam_allowance_cm,
     )
 
-    piece_dicts = [{"label": p.label, "points": p.points} for p in pieces]
+    # piece_lookup/stitch_lookup/grain_lookup are keyed by label and used
+    # later to render/export the NESTED layout, which needs one entry per
+    # placed piece - including every numbered copy below when quantity > 1.
+    # pattern_svg (the single reference garment diagram) uses `pieces`
+    # directly and is unaffected by quantity.
     piece_lookup = {p.label: p.points for p in pieces}
     stitch_lookup = {p.label: p.stitch_points for p in pieces if p.stitch_points}
     grain_lookup = {p.label: p.grain_angle for p in pieces}
 
+    quantity = max(1, request.quantity)
+    piece_dicts = []
+    for copy_num in range(1, quantity + 1):
+        for p in pieces:
+            label = p.label if quantity == 1 else f"{p.label} #{copy_num}"
+            piece_dicts.append({"label": label, "points": p.points})
+            if quantity > 1:
+                piece_lookup[label] = p.points
+                if p.stitch_points:
+                    stitch_lookup[label] = p.stitch_points
+                grain_lookup[label] = p.grain_angle
+
     # 2. Nesting
-    nested = nest_pieces(piece_dicts, request.fabric_width_cm)
-    naive = naive_layout_baseline(piece_dicts, request.fabric_width_cm)
+    nested = nest_pieces(piece_dicts, request.fabric_width_cm, margin_cm=1.5)
+    naive = naive_layout_baseline(piece_dicts, request.fabric_width_cm, gap_cm=1.5)
 
     fabric_saved_cm = round(naive.fabric_length_used_cm - nested.fabric_length_used_cm, 1)
     fabric_saved_pct = (
@@ -186,8 +202,10 @@ def fallback_direction(result: Dict[str, Any]) -> str:
     piece_count = len(pieces) if isinstance(pieces, list) else None
 
     parts = []
+    quantity = sheet.get("quantity") or 1
     if sheet.get("style"):
-        parts.append(f"Your {str(sheet['style']).replace('_', ' ')} pattern is ready.")
+        run_note = f" x{quantity}" if quantity > 1 else ""
+        parts.append(f"Your {str(sheet['style']).replace('_', ' ')} pattern{run_note} is ready.")
     if piece_count:
         parts.append(f"Cut {piece_count} piece{'s' if piece_count != 1 else ''}.")
     if sheet.get("fabric_length_needed_cm"):
