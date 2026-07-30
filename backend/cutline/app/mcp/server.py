@@ -57,6 +57,9 @@ def _build_request(
     include_seam_allowance: bool,
     seam_allowance_cm: float,
     allow_90_rotation: bool,
+    quantity: int = 1,
+    rise: float = 26.0,
+    trouser_length: float = 75.0,
 ) -> PatternRequest:
     """Shared by both tools below so the paid and free-preview inputs can
     never quietly drift apart into two different request shapes."""
@@ -72,11 +75,14 @@ def _build_request(
             shoulder_width=shoulder_width,
             sleeve_length=sleeve_length,
             shirt_length=shirt_length,
+            rise=rise,
+            trouser_length=trouser_length,
         ),
         fabric_width_cm=fabric_width_cm,
         include_seam_allowance=include_seam_allowance,
         seam_allowance_cm=seam_allowance_cm,
         allow_90_rotation=allow_90_rotation,
+        quantity=quantity,
     )
 
 
@@ -96,6 +102,9 @@ async def draft_and_nest_pattern(
     include_seam_allowance: bool = True,
     seam_allowance_cm: float = 1.0,
     allow_90_rotation: bool = False,
+    quantity: int = 1,
+    rise: float = 26.0,
+    trouser_length: float = 75.0,
 ) -> Dict[str, Any]:
     """
     Draft sloper pattern pieces from body measurements and nest them onto a
@@ -105,7 +114,18 @@ async def draft_and_nest_pattern(
 
     style: one of bodice_aline, bodice_straight, bodice_aline_sleeved,
     bodice_top, skirt_straight, skirt_aline, mens_shirt,
-    mens_shirt_short_sleeve. All measurements are in cm.
+    mens_shirt_short_sleeve, dress_straight, dress_aline, tshirt,
+    mens_trousers, mens_breeches, knickers. All measurements are in cm.
+
+    quantity: how many copies of this garment to nest together in one
+    layout, e.g. 50 for a small production run (default 1, max 50 - this
+    nester does true NFP placement, not a coarse bulk packer).
+
+    rise, trouser_length: mens_trousers and mens_breeches only. rise is
+    waist-to-crotch depth, trouser_length is crotch-to-hem (inseam) for
+    mens_trousers, or knee-length (a fixed fraction of trouser_length) for
+    mens_breeches. knickers uses rise too, scaled down, but ignores
+    trouser_length. All three params are ignored by every other style.
 
     Not sure it's worth it yet? Call draft_and_nest_pattern_preview first -
     same inputs, free, everything except the DXF.
@@ -113,7 +133,8 @@ async def draft_and_nest_pattern(
     request = _build_request(
         style, bust_or_chest, waist, fabric_width_cm, hip, ease, back_length,
         skirt_length, shoulder_width, sleeve_length, shirt_length,
-        include_seam_allowance, seam_allowance_cm, allow_90_rotation,
+        include_seam_allowance, seam_allowance_cm, allow_90_rotation, quantity,
+        rise, trouser_length,
     )
 
     result = await run_pattern_job(request)
@@ -149,6 +170,9 @@ async def draft_and_nest_pattern_preview(
     include_seam_allowance: bool = True,
     seam_allowance_cm: float = 1.0,
     allow_90_rotation: bool = False,
+    quantity: int = 1,
+    rise: float = 26.0,
+    trouser_length: float = 75.0,
 ) -> Dict[str, Any]:
     """
     FREE preview of draft_and_nest_pattern - same inputs, same drafting and
@@ -161,7 +185,8 @@ async def draft_and_nest_pattern_preview(
     request = _build_request(
         style, bust_or_chest, waist, fabric_width_cm, hip, ease, back_length,
         skirt_length, shoulder_width, sleeve_length, shirt_length,
-        include_seam_allowance, seam_allowance_cm, allow_90_rotation,
+        include_seam_allowance, seam_allowance_cm, allow_90_rotation, quantity,
+        rise, trouser_length,
     )
 
     result = await run_pattern_job(request, skip_llm=True)
