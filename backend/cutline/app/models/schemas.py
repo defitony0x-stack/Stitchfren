@@ -22,6 +22,12 @@ class PatternStyle(str, Enum):
     skirt_aline = "skirt_aline"
     mens_shirt = "mens_shirt"
     mens_shirt_short_sleeve = "mens_shirt_short_sleeve"
+    dress_straight = "dress_straight"
+    dress_aline = "dress_aline"
+    tshirt = "tshirt"
+    mens_trousers = "mens_trousers"
+    mens_breeches = "mens_breeches"
+    knickers = "knickers"
 
 
 class Measurements(BaseModel):
@@ -45,14 +51,27 @@ class Measurements(BaseModel):
     sleeve_length: float = 60.0
     shirt_length: float = 70.0
 
+    # Trousers only: rise is waist-to-crotch depth, trouser_length is
+    # crotch-to-hem (inseam). total leg length in the pattern is rise +
+    # trouser_length, same split real trouser drafts use.
+    rise: float = 26.0
+    trouser_length: float = 75.0
+
 
 class PatternRequest(BaseModel):
     style: PatternStyle
     measurements: Measurements
-    fabric_width_cm: float = Field(..., gt=0)
+    fabric_width_cm: float = Field(..., gt=0, le=300)
     include_seam_allowance: bool = True
     seam_allowance_cm: float = 1.0
     allow_90_rotation: bool = False
+    # How many copies of this garment to nest together, e.g. "50 t-shirts
+    # for a production run." Capped at 50: the nesting engine does true
+    # Minkowski-sum NFP placement, checking each new piece against every
+    # already-placed one, so cost grows fast with piece count. 50 shirts is
+    # ~200 pieces, already a few seconds; thousands of units needs a
+    # coarser/batched nester, not this one.
+    quantity: int = Field(1, ge=1, le=50)
 
 
 class PiecePlacement(BaseModel):
