@@ -43,8 +43,8 @@ FACILITATOR_PATH_PREFIX = "/api/v6/pay/x402"
 FACILITATOR_URL = FACILITATOR_BASE + FACILITATOR_PATH_PREFIX
 ASSET_NAME = "USD\u20ae0"
 
-PAY_TO_ADDRESS = os.getenv("PAY_TO_ADDRESS")
-USDT0_ASSET_ADDRESS = os.getenv("USDT0_ASSET_ADDRESS")
+PAY_TO_ADDRESS = os.getenv("PAY_TO_ADDRESS", "0xac27574ce229cbe4f6a48d7195566dd32f3a1fbb")
+USDT0_ASSET_ADDRESS = os.getenv("USDT0_ASSET_ADDRESS", "0x779ded0c9e1022225f8e0630b35a9b54be713736")
 OKX_API_KEY = os.getenv("OKX_API_KEY")
 OKX_SECRET_KEY = os.getenv("OKX_SECRET_KEY")
 OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE")
@@ -53,11 +53,31 @@ OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE")
 # STITCHFREN_PRICE_ATOMIC if USD\u20ae0's decimals turn out to differ.
 PRICE_ATOMIC = os.getenv("STITCHFREN_PRICE_ATOMIC", "500000")
 
-REQUIRED_ENV = [PAY_TO_ADDRESS, USDT0_ASSET_ADDRESS, OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE]
+# payTo/asset now always have a real value (see defaults above) so the 402
+# challenge's accepts[] is never null on those fields, regardless of
+# Railway env config - this was the root cause of "empty accepts" reports.
+# Facilitator creds are still real secrets and CANNOT have safe defaults -
+# whether THOSE are set is what facilitator_is_configured() below checks,
+# and it's the only thing verify_and_settle now uses to decide fail-open
+# vs fail-closed.
+FACILITATOR_REQUIRED_ENV = [OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE]
+
+# Explicit, opt-in-only escape hatch for local dev when facilitator creds
+# aren't set. Defaults OFF. This existing outside of an explicit "true" is
+# what let a paid tool call through for free in production - see
+# verify_and_settle's docstring for exactly how.
+ALLOW_UNPAID_MCP = os.getenv("STITCHFREN_ALLOW_UNPAID_MCP", "false").strip().lower() == "true"
+
+
+def facilitator_is_configured() -> bool:
+    return all(FACILITATOR_REQUIRED_ENV)
 
 
 def payment_is_configured() -> bool:
-    return all(REQUIRED_ENV)
+    # Kept for anything still importing the old name; means the same thing
+    # facilitator_is_configured() does now that payTo/asset always have
+    # values.
+    return facilitator_is_configured()
 
 
 def sign_okx(method: str, request_path: str, body: str = "") -> Dict[str, str]:
@@ -167,23 +187,40 @@ async def _facilitator_call(path: str, payload: Dict[str, Any]) -> Dict[str, Any
     return data
 
 
-async def verify_and_settle(x_payment_header: str, resource_url: str) -> None:
+async def verify_and_settle(payment_header: str, resource_url: str) -> None:
     """
     Raises PaymentError if the payment is missing, malformed, or rejected.
     Returns normally (no return value) once verified and settled.
+
+    payment_header: the raw value from either the PAYMENT-SIGNATURE header
+    (OKX's official SDK) or X-PAYMENT (generic x402 spec) - the caller
+    (X402Gate in server.py) checks both and passes whichever it found.
     """
-    if not payment_is_configured():
-        # Payment env vars aren't set - same "unlocked for local testing"
-        # behavior the Node gateway has; do not point OKX's real listing at
-        # a deploy running this way.
-        return
+    if not facilitator_is_configured():
+        if ALLOW_UNPAID_MCP:
+            # Explicit opt-in only (STITCHFREN_ALLOW_UNPAID_MCP=true) - for
+            # local dev with no OKX creds at hand. Never set this on the
+            # deploy OKX's listing points at.
+            return
+        # FAILS CLOSED. This used to `return` silently here whenever
+        # facilitator creds were missing - which meant a Railway deploy
+        # with those env vars unset would deliver the paid result to EVERY
+        # caller for free, with no error and no on-chain settlement. That
+        # is exactly the "deliverable returned, wallet balance unchanged"
+        # report. Refusing outright is the correct behavior for a resource
+        # that's supposed to be sold, not given away by misconfiguration.
+        raise PaymentError(
+            "Payment processing is not configured on this deployment "
+            "(missing OKX facilitator credentials) - refusing to deliver "
+            "a paid result without confirmed on-chain settlement."
+        )
 
     requirements = build_payment_requirements()
 
     try:
-        payload = json.loads(base64.b64decode(x_payment_header))
+        payload = json.loads(base64.b64decode(payment_header))
     except Exception as exc:
-        raise PaymentError(f"Malformed X-PAYMENT header: {exc}") from exc
+        raise PaymentError(f"Malformed payment header: {exc}") from exc
 
     verify_result = await _facilitator_call(
         "/verify", {"x402Version": 2, "paymentPayload": payload, "paymentRequirements": requirements}
