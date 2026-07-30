@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from typing import Any, Dict
 
 from app.drafting.engine import generate_pattern
@@ -36,7 +37,11 @@ from app.models.schemas import PatternRequest
 from app.services.llm_service import generate_cutting_sheet
 
 
-async def run_pattern_job(request: PatternRequest, request_data: Dict[str, Any] | None = None) -> Dict[str, Any]:
+async def run_pattern_job(
+    request: PatternRequest,
+    request_data: Dict[str, Any] | None = None,
+    skip_llm: bool = False,
+) -> Dict[str, Any]:
     """
     Runs draft + nest + DXF export + cutting sheet to completion and returns
     the full result dict. Async because generate_cutting_sheet's optional
@@ -49,6 +54,10 @@ async def run_pattern_job(request: PatternRequest, request_data: Dict[str, Any] 
     is used - the two are only ever different when a caller wants the hash
     to reflect exactly the wire payload it received (Celery's case, where
     request_data is the untouched dict handed to generate_pattern_task).
+
+    skip_llm: passed straight to generate_cutting_sheet. Used by the free
+    draft_and_nest_pattern_preview MCP tool to skip the one real per-call
+    dollar cost (the LLM narrative) in an otherwise-free call.
     """
     if request_data is None:
         request_data = request.model_dump()
@@ -63,6 +72,8 @@ async def run_pattern_job(request: PatternRequest, request_data: Dict[str, Any] 
 
     piece_dicts = [{"label": p.label, "points": p.points} for p in pieces]
     piece_lookup = {p.label: p.points for p in pieces}
+    stitch_lookup = {p.label: p.stitch_points for p in pieces if p.stitch_points}
+    grain_lookup = {p.label: p.grain_angle for p in pieces}
 
     # 2. Nesting
     nested = nest_pieces(piece_dicts, request.fabric_width_cm)
@@ -81,11 +92,19 @@ async def run_pattern_job(request: PatternRequest, request_data: Dict[str, Any] 
         request.fabric_width_cm, nested.fabric_length_used_cm
     )
 
-    # 4. DXF
+    # 4. DXF - built from the NESTED layout (piece_lookup + placements),
+    # same as layout_svg below, not the raw `pieces` list. See
+    # app/exporters/dxf.py's module docstring: passing raw pieces here
+    # used to draw every piece stacked on top of each other at local
+    # (0,0) instead of laid out on the fabric.
     dxf_filename = f"/tmp/stitchfren_{hashlib.md5(json.dumps(request_data, sort_keys=True).encode()).hexdigest()[:10]}.dxf"
     dxf_url = None
     try:
-        export_to_dxf(pieces, request.fabric_width_cm, nested.fabric_length_used_cm, dxf_filename)
+        export_to_dxf(
+            piece_lookup, [p.model_dump() for p in nested.placements],
+            request.fabric_width_cm, nested.fabric_length_used_cm, dxf_filename,
+            stitch_lookup=stitch_lookup, grain_lookup=grain_lookup,
+        )
         if r2.is_configured():
             dxf_url = r2.upload_dxf(dxf_filename)
             os.remove(dxf_filename)
@@ -129,9 +148,9 @@ async def run_pattern_job(request: PatternRequest, request_data: Dict[str, Any] 
 
     result_hash = hashlib.sha256(json.dumps(request_data, sort_keys=True).encode()).hexdigest()[:16]
 
-    # 5. Cutting sheet (rule-based, + LLM narrative if LLM_API_KEY is set)
+    # 5. Cutting sheet (rule-based, + LLM narrative if LLM_API_KEY is set and skip_llm is False)
     cutting_sheet = await generate_cutting_sheet(
-        request, nested, naive, fabric_saved_cm, fabric_saved_pct
+        request, nested, naive, fabric_saved_cm, fabric_saved_pct, skip_llm=skip_llm
     )
 
     warnings = []
@@ -183,3 +202,35 @@ def fallback_direction(result: Dict[str, Any]) -> str:
         parts.append(" ".join(notes))
 
     return " ".join(parts) or "Your pattern and nested cutting layout are ready."
+
+
+def watermark_svg(svg: str, label: str = "PREVIEW \u2014 NOT TO SCALE") -> str:
+    """
+    Stamps a diagonal, semi-transparent watermark across an SVG string,
+    used by the free draft_and_nest_pattern_preview MCP tool. Two reasons
+    this exists instead of just omitting the DXF: (1) without it, a caller
+    could print the preview SVG at 1:1 scale as a free workaround for the
+    paid DXF; (2) it puts the upsell in the artifact itself, not just in a
+    text field an agent might not surface to whoever it's working for.
+
+    Purely a string insertion before the closing </svg> tag - doesn't touch
+    render_pattern_pieces_svg/render_nested_layout_svg or anything else
+    that builds the paid tool's output.
+    """
+    match = re.search(r'viewBox="0 0 ([\d.]+) ([\d.]+)"', svg)
+    if not match:
+        return svg  # unexpected shape - fail open rather than corrupt the SVG
+
+    w, h = float(match.group(1)), float(match.group(2))
+    cx, cy = w / 2, h / 2
+    font_size = max(min(w, h) * 0.13, 18)
+
+    watermark = (
+        f'<text x="{cx:.0f}" y="{cy:.0f}" '
+        f'transform="rotate(-30 {cx:.0f} {cy:.0f})" '
+        f'text-anchor="middle" dominant-baseline="middle" '
+        f'font-family="IBM Plex Mono, monospace" font-weight="700" '
+        f'font-size="{font_size:.0f}" fill="#C9384A" fill-opacity="0.28" '
+        f'stroke="none">{label}</text>'
+    )
+    return svg.replace("</svg>", watermark + "</svg>")
