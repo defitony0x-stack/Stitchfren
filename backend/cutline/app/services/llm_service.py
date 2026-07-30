@@ -127,13 +127,19 @@ async def generate_cutting_sheet(
     naive,
     fabric_saved_cm: float,
     fabric_saved_pct: float,
+    skip_llm: bool = False,
 ) -> Dict[str, Any]:
     """
     Builds the cutting sheet returned alongside a pattern job's result.
     Always returns the rule-based sheet; adds an LLM-written plain-language
-    "narrative" field on top of it only if LLM_API_KEY is configured and the
-    call succeeds. Never raises - a flaky LLM call should never fail an
-    otherwise-successful nesting job.
+    "narrative" field on top of it only if LLM_API_KEY is configured, the
+    call succeeds, AND skip_llm is False. Never raises - a flaky LLM call
+    should never fail an otherwise-successful nesting job.
+
+    skip_llm=True is used by the free draft_and_nest_pattern_preview MCP
+    tool (app/mcp/server.py) - it's the one real per-call dollar cost in the
+    pipeline beyond hosting, so the free tier skips it outright rather than
+    calling it and discarding the result.
     """
     sheet: Dict[str, Any] = {
         "style": request.style.value,
@@ -149,6 +155,9 @@ async def generate_cutting_sheet(
             "Transfer notches and grainlines before unpinning each piece.",
         ],
     }
+
+    if skip_llm:
+        return sheet
 
     prompt = (
         "Write a short plain-language cutting instruction sheet (under 150 "
