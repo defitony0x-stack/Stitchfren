@@ -5,8 +5,42 @@ Adapted from original v1 with minor cleanups for v2.
 
 from __future__ import annotations
 
+import re
 from typing import List, Dict, Any
 from .drafting.engine import PatternPiece
+
+# Matches the trailing " (Style Name) (SA 1.0cm)" (skirts, two groups) or
+# just " (SA 1.0cm)" (bodice/sleeve/shirt, one group) that
+# add_seam_allowance appends to every piece's label in a job - see
+# drafting/engine.py line ~84. Whatever's captured here is identical across
+# every piece in one job, so printing it under each piece individually is
+# pure repetition, and on a narrow piece (e.g. an A-line skirt panel) the
+# repeated text is wider than the piece itself and spills into the
+# neighboring piece's label - the actual cause of pieces reading as
+# visually mingled/overlapping text in the exported SVG.
+_LABEL_SUFFIX_RE = re.compile(r"(?:\s*\([^()]*\))+\s*$")
+
+
+def _short_label(label: str) -> str:
+    """"Skirt Front (A-Line) (SA 1.0cm)" -> "Skirt Front" for the per-piece
+    on-canvas text. The full label (style + SA) still appears once, in the
+    caption _job_caption() renders at the top of the SVG - nothing is lost,
+    it's just said once instead of once per piece."""
+    return _LABEL_SUFFIX_RE.sub("", label).strip() or label
+
+
+def _job_caption(label: str) -> str:
+    """The " (A-Line) (SA 1.0cm)" part a label carries, extracted once to
+    show as a single caption instead of repeating it under every piece.
+    Takes a plain label string (any one piece's - they're all identical
+    for a given job) rather than a piece list, so app/exporters/dxf.py can
+    reuse this without duplicating the regex. Falls back to empty if a
+    label doesn't match the expected shape (e.g. a future style that
+    doesn't add one) - fails open to "no caption" rather than a wrong one."""
+    if not label:
+        return ""
+    match = _LABEL_SUFFIX_RE.search(label)
+    return match.group(0).strip() if match else ""
 
 
 def _piece_path(points, offset_x=0, offset_y=0, scale=4, flip=False):
@@ -18,7 +52,7 @@ def _piece_path(points, offset_x=0, offset_y=0, scale=4, flip=False):
     return d
 
 
-def render_pattern_pieces_svg(pieces: List[PatternPiece], scale=4, gap=30):
+def render_pattern_pieces_svg(pieces: List[PatternPiece], scale=4, gap=40):
     x_cursor = 20
     max_h = 0
     piece_svgs = []
@@ -35,14 +69,22 @@ def render_pattern_pieces_svg(pieces: List[PatternPiece], scale=4, gap=30):
             f'<path d="{d}" fill="#EDF2F4" stroke="#0B2545" stroke-width="1.5"/>'
             f'<text x="{x_cursor + w/2:.1f}" y="{h + 45:.1f}" '
             f'text-anchor="middle" font-family="IBM Plex Mono, monospace" '
-            f'font-size="11" fill="#0B2545">{p.label}</text>'
+            f'font-size="10">{_short_label(p.label)}</text>'
             f'<line x1="{x_cursor + w/2:.1f}" y1="30" x2="{x_cursor + w/2:.1f}" y2="{h+10:.1f}" '
             f'stroke="#C9A24B" stroke-width="1.5" marker-end="url(#arrow)"/>'
         )
         x_cursor += w + gap
 
     total_w = x_cursor + 20
-    total_h = max_h + 70
+    total_h = max_h + 90
+    caption = _job_caption(pieces[0].label) if pieces else ""
+
+    caption_svg = (
+        f'<text x="{total_w/2:.0f}" y="16" text-anchor="middle" '
+        f'font-family="IBM Plex Mono, monospace" font-size="12" '
+        f'fill="#0B2545">{caption}</text>'
+        if caption else ""
+    )
 
     return (
         f'<svg viewBox="0 0 {total_w:.0f} {total_h:.0f}" '
@@ -50,7 +92,7 @@ def render_pattern_pieces_svg(pieces: List[PatternPiece], scale=4, gap=30):
         f'<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="4" refY="4" '
         f'orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#C9A24B"/></marker></defs>'
         f'<rect width="{total_w:.0f}" height="{total_h:.0f}" fill="none"/>'
-        + "".join(piece_svgs) +
+        + caption_svg + "".join(piece_svgs) +
         '</svg>'
     )
 
@@ -98,8 +140,8 @@ def render_nested_layout_svg(
         cy = oy_top - 6
         piece_svgs.append(
             f'<text x="{cx:.1f}" y="{cy:.1f}" text-anchor="middle" '
-            f'font-family="IBM Plex Mono, monospace" font-size="10" '
-            f'fill="#C9A24B">{pl["label"]}</text>'
+            f'font-family="IBM Plex Mono, monospace" font-size="9" '
+            f'fill="#C9A24B">{_short_label(pl["label"])}</text>'
         )
 
     return (
