@@ -222,6 +222,16 @@
   .svc.core .tag{color:var(--rose);}
   .svc.core h3,.svc.core p{color:#fff;}
   .svc.core p{color:rgba(255,255,255,.75);}
+  .svc-price{
+    margin-top:14px !important;font-size:.8rem !important;
+    color:var(--rose) !important;font-weight:600;
+  }
+  .svc-examples{margin-top:36px;}
+  .svc-examples ul{list-style:none;margin:14px 0 0;padding:0;display:grid;gap:10px;}
+  .svc-examples li{
+    font-family:'IBM Plex Mono',monospace;font-size:.82rem;color:var(--ink-soft);
+    border-left:2px solid var(--rose);padding:2px 0 2px 14px;
+  }
 
   /* footer */
   footer{border-top:1px solid var(--line);padding:48px 0 36px;}
@@ -619,6 +629,7 @@
           <h3>Draft &amp; nest a pattern</h3>
           <p>The core call: measurements and a style in, a fully nested, fabric-savings-verified
              layout out. Everything below supports this one job.</p>
+          <p class="svc-price mono">Price: 0.5 USDT per call</p>
         </div>
         <div class="svc">
           <span class="tag">Drafting</span>
@@ -650,6 +661,14 @@
           <p>Submit a job, poll for status, pull the result once it's ready.
              Built as an async queue from the start, not bolted on after.</p>
         </div>
+      </div>
+      <div class="svc-examples">
+        <span class="eyebrow">Example prompts</span>
+        <ul>
+          <li>"Generate a custom sloper pattern for a wedding dress, bust 92cm, waist 74cm, hip 98cm."</li>
+          <li>"Nest fabric for a bulk t-shirt production run, fabric width 150cm."</li>
+          <li>"Draft a men's shirt pattern and tell me how much fabric I'll save vs. a standard layout."</li>
+        </ul>
       </div>
     </div>
   </section>
