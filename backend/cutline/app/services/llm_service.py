@@ -25,17 +25,26 @@ LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
 _TIMEOUT_SECONDS = 20.0
 
 # --- Rule-based fallback: matches things like "bust 92", "waist: 74cm",
-# "shoulder width 40 cm" without needing an LLM call at all. ---
+# "shoulder width 40 cm", AND more conversational phrasing like "waist sits
+# around 74" or "hip is roughly 98" - the \D window has to be wide enough
+# to span filler words ("sits around", "is roughly") between the keyword
+# and the number, without needing an LLM call at all. ---
 _MEASUREMENT_PATTERNS = {
-    "bust_or_chest": r"(?:bust|chest)\D{0,10}(\d+(?:\.\d+)?)",
-    "waist": r"waist\D{0,10}(\d+(?:\.\d+)?)",
-    "hip": r"hip\D{0,10}(\d+(?:\.\d+)?)",
-    "back_length": r"back[\s_-]?length\D{0,10}(\d+(?:\.\d+)?)",
-    "skirt_length": r"skirt[\s_-]?length\D{0,10}(\d+(?:\.\d+)?)",
-    "shoulder_width": r"shoulder(?:[\s_-]?width)?\D{0,10}(\d+(?:\.\d+)?)",
-    "sleeve_length": r"sleeve[\s_-]?length\D{0,10}(\d+(?:\.\d+)?)",
-    "shirt_length": r"shirt[\s_-]?length\D{0,10}(\d+(?:\.\d+)?)",
-    "ease": r"\bease\D{0,10}(\d+(?:\.\d+)?)",
+    # bust_or_chest tries two directions: "bust 92" / "chest is 92" (keyword
+    # before number), and "92 up top" (number before keyword) - "up top"
+    # never comes before the number the way bust/chest/waist/hip do.
+    "bust_or_chest": [
+        r"(?:bust|chest)\D{0,25}(\d+(?:\.\d+)?)",
+        r"(\d+(?:\.\d+)?)\D{0,10}up top",
+    ],
+    "waist": [r"waist\D{0,25}(\d+(?:\.\d+)?)"],
+    "hip": [r"hip\D{0,25}(\d+(?:\.\d+)?)"],
+    "back_length": [r"back[\s_-]?length\D{0,25}(\d+(?:\.\d+)?)"],
+    "skirt_length": [r"skirt[\s_-]?length\D{0,25}(\d+(?:\.\d+)?)"],
+    "shoulder_width": [r"shoulder(?:[\s_-]?width)?\D{0,25}(\d+(?:\.\d+)?)"],
+    "sleeve_length": [r"sleeve[\s_-]?length\D{0,25}(\d+(?:\.\d+)?)"],
+    "shirt_length": [r"shirt[\s_-]?length\D{0,25}(\d+(?:\.\d+)?)"],
+    "ease": [r"\bease\D{0,25}(\d+(?:\.\d+)?)"],
 }
 
 
@@ -43,13 +52,15 @@ def parse_measurements_from_text(text: str) -> Optional[Dict[str, float]]:
     """Regex fallback used when the LLM is unconfigured or fails."""
     lowered = text.lower()
     found: Dict[str, float] = {}
-    for field, pattern in _MEASUREMENT_PATTERNS.items():
-        match = re.search(pattern, lowered)
-        if match:
-            try:
-                found[field] = float(match.group(1))
-            except ValueError:
-                continue
+    for field, patterns in _MEASUREMENT_PATTERNS.items():
+        for pattern in patterns:
+            match = re.search(pattern, lowered)
+            if match:
+                try:
+                    found[field] = float(match.group(1))
+                    break
+                except ValueError:
+                    continue
     return found or None
 
 
@@ -143,6 +154,7 @@ async def generate_cutting_sheet(
     """
     sheet: Dict[str, Any] = {
         "style": request.style.value,
+        "quantity": getattr(request, "quantity", 1),
         "fabric_width_cm": request.fabric_width_cm,
         "fabric_length_needed_cm": nested.fabric_length_used_cm,
         "naive_fabric_length_cm": naive.fabric_length_used_cm,
