@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from ..models.schemas import (
     PatternRequest,
     PatternResponse,
+    PatternStyle,
     ErrorResponse,
 )
 from ..workers.tasks import generate_pattern_task
@@ -71,6 +72,18 @@ app.add_middleware(
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "2.0.0"}
+
+
+@app.get("/api/styles")
+async def list_styles():
+    """
+    Public, unauthenticated: just the current PatternStyle enum values and
+    count. Exists so the frontend's "N drafting styles shipped" stat reads
+    the real enum instead of a hardcoded number that goes stale every time
+    a style gets added (see PatternStyle in app/models/schemas.py).
+    """
+    styles = [s.value for s in PatternStyle]
+    return {"styles": styles, "count": len(styles)}
 
 
 @app.post("/api/keys/generate")
