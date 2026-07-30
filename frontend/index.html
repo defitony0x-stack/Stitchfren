@@ -285,14 +285,8 @@
     font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--ink-soft);
     margin-bottom:22px;padding-bottom:16px;border-bottom:1px dashed var(--line);
   }
-  .demo-cfg input{
-    font-family:'IBM Plex Mono',monospace;font-size:.72rem;padding:7px 10px;
-    border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink);
-    flex:1;min-width:180px;
-  }
-  .demo-cfg button{
-    font-family:'IBM Plex Mono',monospace;font-size:.72rem;padding:7px 12px;
-    border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer;
+  .demo-live-badge{
+    font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--ink-soft);
   }
   .demo-form{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:22px;}
   .demo-form label{
@@ -457,7 +451,7 @@
   <!-- STATS -->
   <div class="band">
     <div class="wrap stat-grid">
-      <div class="stat"><b>8</b><span>Drafting styles shipped today</span></div>
+      <div class="stat"><b id="statStyleCount">14</b><span>Drafting styles shipped today</span></div>
       <div class="stat"><b>0 cm²</b><span>Overlap tolerance on placed pieces</span></div>
       <div class="stat"><b>1:1</b><span>Deterministic — same input, same layout</span></div>
       <div class="stat"><b>DXF</b><span>Real-scale, cut-ready export</span></div>
@@ -540,10 +534,7 @@
 
           <div id="demoLive" class="demo-live">
             <div class="demo-cfg">
-              <span>API endpoint:</span>
-              <input id="apiBase" type="text" placeholder="https://your-app.up.railway.app" />
-              <button id="apiBaseSave" type="button">Save</button>
-              <span id="apiKeyStatus"></span>
+              <span id="apiKeyStatus" class="demo-live-badge">● Live demo</span>
             </div>
 
             <div class="demo-freetext">
@@ -568,6 +559,12 @@
                   <option value="skirt_aline">Skirt — A-line</option>
                   <option value="mens_shirt">Men's shirt — Long sleeve</option>
                   <option value="mens_shirt_short_sleeve">Men's shirt — Short sleeve</option>
+                  <option value="dress_straight">Dress — Straight</option>
+                  <option value="dress_aline">Dress — A-line</option>
+                  <option value="tshirt">T-shirt</option>
+                  <option value="mens_trousers">Men's trousers</option>
+                  <option value="mens_breeches">Men's breeches (knee-length)</option>
+                  <option value="knickers">Knickers</option>
                 </select>
               </label>
               <label>Bust / chest (cm)
@@ -576,14 +573,32 @@
               <label>Waist (cm)
                 <input id="fWaist" type="number" step="0.1" value="74" required />
               </label>
-              <label>Hip (cm)
+              <label id="fieldHip">Hip (cm)
                 <input id="fHip" type="number" step="0.1" value="98" />
               </label>
+              <label id="fieldSkirtLength">Skirt / dress length (cm)
+                <input id="fSkirtLength" type="number" step="0.1" value="55" />
+              </label>
+              <label id="fieldSleeveLength">Sleeve length (cm)
+                <input id="fSleeveLength" type="number" step="0.1" value="60" />
+              </label>
+              <label id="fieldShirtLength">Garment length (cm)
+                <input id="fShirtLength" type="number" step="0.1" value="70" />
+              </label>
+              <label id="fieldRise">Rise / crotch depth (cm)
+                <input id="fRise" type="number" step="0.1" value="26" />
+              </label>
+              <label id="fieldTrouserLength">Inseam length (cm)
+                <input id="fTrouserLength" type="number" step="0.1" value="75" />
+              </label>
               <label>Fabric width (cm)
-                <input id="fFabricWidth" type="number" step="0.1" value="150" required />
+                <input id="fFabricWidth" type="number" step="0.1" min="20" max="300" value="150" required />
               </label>
               <label>Seam allowance (cm)
                 <input id="fSeam" type="number" step="0.1" value="1.0" />
+              </label>
+              <label>Quantity (for a production run)
+                <input id="fQuantity" type="number" step="1" min="1" max="50" value="1" />
               </label>
             </form>
 
@@ -693,12 +708,14 @@
   // Deployed FastAPI base URL. Still editable from the UI and overridden by
   // localStorage if a visitor sets their own, but this is what everyone gets
   // by default.
+  // Deployed FastAPI base URL. Not shown anywhere in the UI - a visitor
+  // has no way to see or edit it from the page. Override only works via a
+  // ?api= query param (for Tony's own staging/testing), never via a
+  // visible field. See getApiBase() below.
   const DEFAULT_API_BASE = "https://stitchfren-production.up.railway.app";
 
   const placeholder = document.getElementById('demoPlaceholder');
   const live = document.getElementById('demoLive');
-  const apiBaseInput = document.getElementById('apiBase');
-  const apiBaseSave = document.getElementById('apiBaseSave');
   const apiKeyStatus = document.getElementById('apiKeyStatus');
   const submitBtn = document.getElementById('demoSubmit');
   const statusEl = document.getElementById('demoStatus');
@@ -712,11 +729,16 @@
   const freeTextBtn = document.getElementById('freeTextParse');
   const freeTextStatusEl = document.getElementById('freeTextStatus');
 
+  // ?api=... sets a one-time override (for internal testing against a
+  // staging backend) without ever putting the URL on the visible page.
+  (function applyApiOverrideFromQueryString(){
+    const params = new URLSearchParams(window.location.search);
+    const override = params.get('api');
+    if(override) localStorage.setItem('stitchfren_api_base', override.replace(/\/$/, ''));
+  })();
+
   function getApiBase(){
     return localStorage.getItem('stitchfren_api_base') || DEFAULT_API_BASE;
-  }
-  function setApiBase(v){
-    localStorage.setItem('stitchfren_api_base', v.replace(/\/$/, ''));
   }
   function getApiKey(){
     return localStorage.getItem('stitchfren_api_key') || '';
@@ -731,20 +753,71 @@
     if(getApiBase()){
       placeholder.classList.add('hidden');
       live.classList.add('active');
-      apiBaseInput.value = getApiBase();
-      apiKeyStatus.textContent = getApiKey() ? '· key ready' : '· will fetch a key on first run';
     } else {
       placeholder.classList.remove('hidden');
       live.classList.remove('active');
     }
   }
 
-  apiBaseSave.addEventListener('click', function(){
-    const v = apiBaseInput.value.trim();
-    if(!v) return;
-    setApiBase(v);
-    refreshDemoMode();
-  });
+  // Live style count for the "N drafting styles shipped" stat, straight
+  // from the backend's PatternStyle enum via /api/styles - see that
+  // route's docstring in app/api/main.py for why this exists (the old "8"
+  // was hardcoded and went stale the moment a style got added). Static
+  // "11" in the HTML is the fallback if this fetch fails for any reason
+  // (offline, CORS, backend down) - the stat should degrade quietly, not
+  // show blank or throw.
+  async function refreshStyleCount(){
+    try{
+      const res = await fetch(getApiBase() + '/api/styles');
+      if(!res.ok) return;
+      const data = await res.json();
+      if(typeof data.count === 'number'){
+        document.getElementById('statStyleCount').textContent = data.count;
+      }
+    } catch(err){
+      // fall through silently, static fallback already in the DOM
+    }
+  }
+
+  // Which optional fields each style's drafting function actually reads,
+  // straight from app/drafting/engine.py - e.g. mens_shirt_front/tshirt_front
+  // never touch m.waist or m.hip, they're chest-only garments, so those
+  // fields are just noise for those styles. Keeps the form honest about
+  // what a given style will and won't use.
+  const STYLE_FIELDS = {
+    bodice_aline:            ['hip', 'skirtLength'],
+    bodice_straight:         ['hip', 'skirtLength'],
+    bodice_aline_sleeved:    ['hip', 'skirtLength', 'sleeveLength'],
+    bodice_top:              [],
+    skirt_straight:          ['hip', 'skirtLength'],
+    skirt_aline:             ['hip', 'skirtLength'],
+    mens_shirt:              ['sleeveLength', 'shirtLength'],
+    mens_shirt_short_sleeve: ['sleeveLength', 'shirtLength'],
+    dress_straight:          ['hip', 'skirtLength'],
+    dress_aline:             ['hip', 'skirtLength'],
+    tshirt:                  ['sleeveLength', 'shirtLength'],
+    mens_trousers:           ['hip', 'rise', 'trouserLength'],
+    mens_breeches:           ['hip', 'rise', 'trouserLength'],
+    knickers:                ['hip', 'rise'],
+  };
+  const FIELD_WRAPPERS = {
+    hip: 'fieldHip',
+    skirtLength: 'fieldSkirtLength',
+    sleeveLength: 'fieldSleeveLength',
+    shirtLength: 'fieldShirtLength',
+    rise: 'fieldRise',
+    trouserLength: 'fieldTrouserLength',
+  };
+  const styleSelect = document.getElementById('fStyle');
+
+  function updateFieldsForStyle(){
+    const relevant = STYLE_FIELDS[styleSelect.value] || [];
+    Object.keys(FIELD_WRAPPERS).forEach(function(key){
+      const el = document.getElementById(FIELD_WRAPPERS[key]);
+      el.style.display = relevant.indexOf(key) === -1 ? 'none' : '';
+    });
+  }
+  styleSelect.addEventListener('change', updateFieldsForStyle);
 
   // Optional free-text measurement entry. Calls /api/parse-text (LLM with a
   // rule-based fallback server-side) and fills in whichever of the existing
@@ -838,7 +911,6 @@
 
   async function submitJob(base, payload, forceFreshKey){
     const key = await ensureApiKey(base, forceFreshKey);
-    apiKeyStatus.textContent = '· key ready';
 
     statusEl.textContent = 'Submitting job…';
     const res = await fetch(base + '/api/pattern', {
@@ -870,9 +942,15 @@
       measurements: {
         bust_or_chest: parseFloat(document.getElementById('fBust').value),
         waist: parseFloat(document.getElementById('fWaist').value),
-        hip: document.getElementById('fHip').value ? parseFloat(document.getElementById('fHip').value) : null
+        hip: document.getElementById('fHip').value ? parseFloat(document.getElementById('fHip').value) : null,
+        skirt_length: parseFloat(document.getElementById('fSkirtLength').value || '55'),
+        sleeve_length: parseFloat(document.getElementById('fSleeveLength').value || '60'),
+        shirt_length: parseFloat(document.getElementById('fShirtLength').value || '70'),
+        rise: parseFloat(document.getElementById('fRise').value || '26'),
+        trouser_length: parseFloat(document.getElementById('fTrouserLength').value || '75')
       },
       fabric_width_cm: parseFloat(document.getElementById('fFabricWidth').value),
+      quantity: parseInt(document.getElementById('fQuantity').value, 10) || 1,
       include_seam_allowance: true,
       seam_allowance_cm: parseFloat(document.getElementById('fSeam').value || '1.0')
     };
@@ -900,6 +978,8 @@
   });
 
   refreshDemoMode();
+  refreshStyleCount();
+  updateFieldsForStyle();
 })();
 </script>
 </body>
