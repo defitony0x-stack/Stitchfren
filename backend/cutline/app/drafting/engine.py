@@ -27,6 +27,13 @@ class PatternPiece:
     points: List[Point]          # Closed polygon, (x, y) with y increasing downward (drafting convention)
     grain_angle: float = 0.0
     seam_pairs: List[Tuple[int, int]] = field(default_factory=list)  # indices of seams that match
+    # The pre-seam-allowance outline, set by add_seam_allowance() below.
+    # None when no seam allowance was applied (points IS the stitch line in
+    # that case - nothing to distinguish). Used by app/exporters/dxf.py to
+    # draw the actual sew line alongside the cut line, which a "cut-ready"
+    # pattern file should have and previously didn't - only the cut line
+    # (points) survived once add_seam_allowance overwrote it.
+    stitch_points: Optional[List[Point]] = None
 
 
 def _default_shoulder(bust_or_chest: float) -> float:
@@ -76,7 +83,9 @@ def _offset_polygon(points: List[Point], offset: float, is_outer: bool = True) -
 
 
 def add_seam_allowance(piece: PatternPiece, allowance: float) -> PatternPiece:
-    """Returns a new piece with seam allowance added (outer offset)."""
+    """Returns a new piece with seam allowance added (outer offset).
+    stitch_points is set to the ORIGINAL (pre-offset) outline - that's the
+    sew line; the new, larger `points` is the cut line."""
     if allowance <= 0:
         return piece
     new_points = _offset_polygon(piece.points, allowance, is_outer=True)
@@ -84,6 +93,7 @@ def add_seam_allowance(piece: PatternPiece, allowance: float) -> PatternPiece:
         label=f"{piece.label} (SA {allowance}cm)",
         points=new_points,
         grain_angle=piece.grain_angle,
+        stitch_points=piece.points,
     )
 
 
