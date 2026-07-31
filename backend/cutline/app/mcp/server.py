@@ -20,11 +20,13 @@ Design decisions, and why:
   app/api/main.py's /api/pattern + /api/status are untouched, for the
   existing frontend demo and any other direct REST caller.
 - Payment gating happens in X402Gate below, NOT inside the tool function.
-  It only challenges an actual tools/call for draft_and_nest_pattern -
-  initialize and tools/list stay free, because a buyer's agent (and OKX's
-  own listing/evaluator) needs to discover the tool and its schema before
-  it can ever construct a payment for it. Gating the whole /mcp path would
-  make the server fail its own discovery handshake.
+  initialize/notifications/initialized/ping always stay free (session
+  bootstrap), and tools/list is free once a session exists (i.e. after a
+  free initialize) - so a real client can complete the handshake and
+  discover both tools, including the free preview tool, without paying.
+  A bare/sessionless tools/list POST (an automated x402 prober, not a real
+  MCP client) is still priced - see X402Gate/_requires_payment for the
+  exact rule and why.
 """
 
 from __future__ import annotations
@@ -241,13 +243,13 @@ def _requires_payment(body: bytes) -> bool:
     "absence of x402 challenge" report: GET, a generic POST body, and a
     bare tools/list POST should all get 402, not 400.
 
-    One real tradeoff this creates: tools/list is now priced too, so an MCP
-    client can't discover the tool schemas (including that the free preview
-    tool exists) without paying first, unless it already knows the tool
-    name from elsewhere (e.g. the marketplace listing text, which already
-    names both tools). If that tradeoff turns out to be wrong for how OKX
-    actually wants this to work, the fix is narrowing FREE_METHODS back
-    down - flagged here rather than decided silently.
+    One real tradeoff this creates: a bare, sessionless tools/list can't
+    discover the tool schemas (including that the free preview tool
+    exists) without paying. X402Gate's caller mitigates this for real MCP
+    clients specifically - see its `tools_list_in_session` check, which
+    lets tools/list through free once a session exists (i.e. after a free
+    initialize), while still pricing a stateless probe tools/list the way
+    OKX's x402-check tool sends one.
     """
     try:
         payload = json.loads(body)
@@ -368,6 +370,7 @@ class X402Gate:
         # the checker as HTTP 400. Default the params for a bare initialize so
         # the handshake completes and the endpoint reads as valid. A real MCP
         # client sends full params and is unaffected.
+        parsed = None
         try:
             parsed = json.loads(body)
             if (
@@ -383,6 +386,20 @@ class X402Gate:
                 body = json.dumps(parsed).encode()
         except Exception:
             pass
+
+        # tools/list is free ONLY when it carries a session established by a
+        # prior (free) initialize - a real MCP client that's already done the
+        # handshake can list tools, including discovering the free preview
+        # tool, without paying. A bare, sessionless tools/list POST (no prior
+        # initialize) is still priced - that's what OKX's x402-check probe
+        # actually sends, and the "absence of x402 challenge" report was
+        # about exactly that stateless-probe case, not a real client's normal
+        # post-handshake discovery call.
+        tools_list_in_session = (
+            isinstance(parsed, dict)
+            and parsed.get("method") == "tools/list"
+            and "mcp-session-id" in headers
+        )
 
         replayed = False
 
@@ -402,7 +419,7 @@ class X402Gate:
             # "200 with an empty body" failure the OKX-side probe found.
             return await receive()
 
-        if _requires_payment(body):
+        if _requires_payment(body) and not tools_list_in_session:
             # OKX's official SDK/buyer replay uses PAYMENT-SIGNATURE; a
             # generic x402-spec client may send X-PAYMENT instead. Accept
             # either, preferring PAYMENT-SIGNATURE - this was the other
