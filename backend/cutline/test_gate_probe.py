@@ -1,18 +1,32 @@
 """
-In-memory ASGI test for the X402Gate fix (no network, no deploy).
+In-memory ASGI test for X402Gate's dispatch logic (no network, no deploy).
+
+What changed from the previous version of this file: server.py no longer
+calls the OKX facilitator directly. A "paid" request now gets forwarded to
+a PaymentMiddlewareASGI instance built in app/mcp/x402.py's build_paid_app()
+- that middleware, not this codebase, owns 402-body construction and
+verify()/settle(). This test can't meaningfully fake OKX's real facilitator
+behavior (never could, even in the old version - the old "verify is no-op"
+stub was standing in for "no env configured", not for a real facilitator
+call), so it stubs build_paid_app() to return a minimal fake ASGI app that
+mimics the observable contract: 402 with a payment-required header when no
+payment header is present, 200 pass-through when one is. What this test
+actually verifies is X402Gate's own logic - which of the two apps a given
+request gets routed to based on the JSON-RPC method in its body - since
+that routing is the one piece of this file that has no SDK equivalent and
+is still hand-written.
 
 Simulates how OKX's x402 endpoint validator and a real buyer agent hit the
-/mcp endpoint, and asserts the gate behaves correctly:
+/mcp endpoint, and asserts the dispatcher behaves correctly:
 
   probe (sessionless, non-initialize)  -> 402 with payment-required header
   initialize (sessionless)             -> passes through to fastmcp (200-ish)
-  paid tools/call w/o X-PAYMENT        -> 402
-  paid tools/call w/ X-PAYMENT (no env)-> passes through (verify no-op)
+  paid tools/call w/o payment header   -> 402
+  paid tools/call w/ payment header    -> passes through (fake paid_app)
 
 We import the gate logic WITHOUT the heavy `app` dependency tree by
 registering lightweight stub modules for the bits server.py imports at module
-load time. The gate only relies on `payment_required_body` from x402, which we
-stub to emit a minimal-but-valid challenge.
+load time.
 """
 import asyncio
 import base64
@@ -34,7 +48,7 @@ def _stub(name):
 _stub("app")
 _stub("app.mcp")
 app_job = _stub("app.mcp.job")
-for _n in ("run_pattern_job", "fallback_direction"):
+for _n in ("run_pattern_job", "fallback_direction", "watermark_svg"):
     setattr(app_job, _n, lambda *a, **k: {})
 app_models = _stub("app.models")
 app_schemas = _stub("app.models.schemas")
@@ -43,41 +57,55 @@ for _n in ("Measurements", "PatternRequest", "PatternStyle"):
     setattr(app_schemas, _n, object)
 
 
-# Minimal x402 stub: only what server.py calls at import + runtime.
+# Minimal x402 stub: only what server.py calls at import time now -
+# build_paid_app(). The real PaymentMiddlewareASGI/OKXFacilitatorClient
+# objects live in the real (un-network-testable) SDK, so this stubs the
+# observable contract instead of the real facilitator call: 402-with-
+# challenge when no payment header is present, pass-through when one is.
 x402 = _stub("app.mcp.x402")
 
 
-class PaymentError(Exception):
-    pass
-
-
-def payment_required_body(resource_url, error):
+def _fake_402_body(error):
     return {
         "x402Version": 2,
         "error": error,
-        "resource": {"url": resource_url, "description": "Stitchfren probe", "mimeType": "application/json"},
+        "resource": {"description": "Stitchfren probe", "mimeType": "application/json"},
         "accepts": [{
             "scheme": "exact",
             "network": "eip155:196",
-            "amount": "500000",
-            "asset": "0x779dEd0c9E1022225F8e0630b35a9b54BE713736",
             "payTo": "0xac27574ce229cbe4f6a48d7195566dd32f3a1fbb",
             "maxTimeoutSeconds": 60,
-            "extra": {"name": "USDT0", "version": "1"},
         }],
         "extensions": {},
     }
 
 
-async def verify_and_settle(x_payment_header, resource_url):
-    # With no real facilitator env configured, behave like the real code:
-    # verify_and_settle returns (no-op) when payment env isn't configured.
-    return None
+def build_paid_app(inner_app, resource_description):
+    async def fake_paid_app(scope, receive, send):
+        headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+        if headers.get("payment-signature") or headers.get("x-payment"):
+            # Simulated middleware behavior for "a payment header was
+            # provided" - this stub does NOT verify it's a *valid* payment;
+            # that's OKX's facilitator's job, not something testable here
+            # without hitting their real API.
+            await inner_app(scope, receive, send)
+            return
+        body = json.dumps(_fake_402_body("Payment required.")).encode()
+        header_value = base64.b64encode(body).decode()
+        await send({
+            "type": "http.response.start",
+            "status": 402,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"payment-required", header_value.encode()),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    return fake_paid_app
 
 
-x402.PaymentError = PaymentError
-x402.payment_required_body = payment_required_body
-x402.verify_and_settle = verify_and_settle
+x402.build_paid_app = build_paid_app
 app_mcp = _stub("app.mcp")
 app_mcp.x402 = x402
 
@@ -112,9 +140,14 @@ fm.FastMCP = FakeFastMCP
 sys.modules["fastmcp"] = fm
 
 spec.loader.exec_module(srv)
-# The gate wraps a fake inner app instead of the real fastmcp server.
+# The gate wraps a fake inner app instead of the real fastmcp server, and
+# the free/paid split now happens via two separate app instances rather
+# than one wrapped app - same shape server.py itself builds at the bottom
+# of the file, just with the fake fastmcp app in both slots.
 srv.mcp_app = fm.FastMCP("Stitchfren").http_app()
-srv.mcp_app_gated = srv.X402Gate(srv.AcceptFixer(srv.mcp_app))
+free_app = srv.AcceptFixer(srv.mcp_app)
+paid_app = x402.build_paid_app(srv.AcceptFixer(srv.mcp_app), "Stitchfren probe")
+srv.mcp_app_gated = srv.X402Gate(free_app, paid_app)
 
 
 def make_scope(method="POST", path="/mcp/", headers=None, body=b""):
