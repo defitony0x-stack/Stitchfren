@@ -25,13 +25,20 @@ Design decisions, and why:
   free initialize) - so a real client can complete the handshake and
   discover both tools, including the free preview tool, without paying.
   A bare/sessionless tools/list POST (an automated x402 prober, not a real
-  MCP client) is still priced - see X402Gate/_requires_payment for the
-  exact rule and why.
+  MCP client) is still priced - see X402Gate/_is_free for the exact rule
+  and why.
+- X402Gate no longer calls the OKX facilitator itself. A "paid" request now
+  gets handed to a real x402.http.middleware.fastapi.PaymentMiddlewareASGI
+  instance (built in app/mcp/x402.py's build_paid_app()) instead of this
+  class calling facilitator.verify()/.settle() directly - see x402.py's
+  module docstring for why that changed. What X402Gate still does, because
+  no SDK has an equivalent for it: inspect the JSON-RPC method in the body
+  to decide which of the two apps (free passthrough vs. middleware-wrapped)
+  a given POST /mcp call should go to.
 """
 
 from __future__ import annotations
 
-import base64
 import json
 from typing import Any, Dict, Optional
 
@@ -39,7 +46,7 @@ from fastmcp import FastMCP
 
 from app.models.schemas import Measurements, PatternRequest, PatternStyle
 from app.mcp.job import run_pattern_job, fallback_direction, watermark_svg
-from app.mcp.x402 import PaymentError, payment_required_body, verify_and_settle
+from app.mcp.x402 import build_paid_app
 
 mcp = FastMCP("Stitchfren")
 
@@ -219,7 +226,7 @@ mcp_app = mcp.http_app(path="/")
 # Methods that must stay reachable with NO payment, because they're what a
 # client needs just to bootstrap/maintain an MCP session - not because
 # they're "the free part of the product." tools/list is deliberately NOT in
-# this set (see _requires_payment's docstring).
+# this set (see _is_free's docstring).
 FREE_METHODS = {"initialize", "notifications/initialized", "ping"}
 
 # Tool names callable with no payment even though their method (tools/call)
@@ -227,45 +234,44 @@ FREE_METHODS = {"initialize", "notifications/initialized", "ping"}
 FREE_TOOL_NAMES = {"draft_and_nest_pattern_preview"}
 
 
-def _requires_payment(body: bytes) -> bool:
+def _is_free(body: bytes, headers: Dict[str, str]) -> bool:
     """
-    Default-DENY: requires payment for anything that isn't explicitly
-    session-bootstrap plumbing (FREE_METHODS) or a call to a tool we've
-    deliberately made free (FREE_TOOL_NAMES). This replaces the previous
-    default-ALLOW version of this function, which only recognized
-    tools/call-for-the-paid-tool as needing payment and let everything else
-    - including a bare tools/list with no session, and non-JSON-RPC probe
-    bodies - fall through to fastmcp, which correctly rejects them as
-    invalid MCP requests with a raw 400. OKX's own x402-check prober
-    doesn't do a full MCP handshake before probing for pricing; it expects
-    ANY unauthenticated hit on a route=x402 resource to come back as a 402
-    with accepts[], not a protocol-level 400. That's the literal ask in the
-    "absence of x402 challenge" report: GET, a generic POST body, and a
-    bare tools/list POST should all get 402, not 400.
+    Default-DENY: only explicit session-bootstrap plumbing (FREE_METHODS),
+    an in-session tools/list, or a call to a tool we've deliberately made
+    free (FREE_TOOL_NAMES) counts as free. Everything else, including a
+    bare/sessionless tools/list and non-JSON-RPC probe bodies, is "not
+    free" and gets routed to the PaymentMiddlewareASGI-wrapped app instead
+    of fastmcp directly. OKX's own x402-check prober doesn't do a full MCP
+    handshake before probing for pricing; it expects ANY unauthenticated
+    hit on a route=x402 resource to come back as a 402 with accepts[], not
+    a protocol-level 400. That's the literal ask in the "absence of x402
+    challenge" report: GET, a generic POST body, and a bare tools/list POST
+    should all get 402, not 400.
 
     One real tradeoff this creates: a bare, sessionless tools/list can't
     discover the tool schemas (including that the free preview tool
-    exists) without paying. X402Gate's caller mitigates this for real MCP
-    clients specifically - see its `tools_list_in_session` check, which
-    lets tools/list through free once a session exists (i.e. after a free
-    initialize), while still pricing a stateless probe tools/list the way
-    OKX's x402-check tool sends one.
+    exists) without paying. The in-session check below mitigates this for
+    real MCP clients specifically - tools/list is free once a session
+    exists (i.e. after a free initialize), while a stateless probe
+    tools/list the way OKX's x402-check tool sends one is still priced.
     """
     try:
         payload = json.loads(body)
     except Exception:
-        return True  # unparseable / non-JSON-RPC probe body -> priced
+        return False  # unparseable / non-JSON-RPC probe body -> priced path
     if not isinstance(payload, dict):
-        return True
+        return False
 
     method = payload.get("method")
     if method in FREE_METHODS:
-        return False
+        return True
+    if method == "tools/list" and "mcp-session-id" in headers:
+        return True
     if method == "tools/call":
         params = payload.get("params") or {}
         if params.get("name") in FREE_TOOL_NAMES:
-            return False
-    return True
+            return True
+    return False
 
 
 class AcceptFixer:
@@ -313,13 +319,19 @@ class AcceptFixer:
 
 class X402Gate:
     """
-    Thin ASGI wrapper around mcp_app. Default-deny: requires a valid
-    PAYMENT-SIGNATURE or X-PAYMENT header for anything except session
-    bootstrap (initialize/notifications/initialized/ping) and calls to the
-    free preview tool - see _requires_payment's docstring for why this is
-    default-deny rather than default-allow. Buffers the POST body (ASGI
-    bodies can only be read once) so it can inspect the JSON-RPC method
-    before deciding, then replays it to the wrapped app unchanged.
+    Thin ASGI dispatcher in front of two inner apps: `free_app` (fastmcp,
+    Accept-header-fixed, no payment gating) and `paid_app` (the same thing
+    wrapped in a real PaymentMiddlewareASGI - see x402.py's build_paid_app).
+    Buffers the POST body (ASGI bodies can only be read once) so it can
+    inspect the JSON-RPC method before deciding which app to forward to,
+    then replays the body to whichever app it picks, unchanged.
+
+    This class no longer talks to the OKX facilitator itself, and no longer
+    builds the 402 body by hand for POST requests - paid_app's
+    PaymentMiddlewareASGI does both of those now. What's left here is only
+    the JSON-RPC method classification, which has no SDK equivalent because
+    the SDK's routing model is one price per "METHOD /path" and this
+    service multiplexes several JSON-RPC methods over one POST /mcp path.
 
     NOTE: only handles a single, non-batched JSON-RPC request per POST body
     - the common case for a tools/call. A batched-array request smuggling a
@@ -328,32 +340,33 @@ class X402Gate:
     trusted with a real, non-trivial price.
     """
 
-    def __init__(self, app):
-        self.app = app
+    def __init__(self, free_app, paid_app):
+        self.free_app = free_app
+        self.paid_app = paid_app
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
-            await self.app(scope, receive, send)
+            await self.free_app(scope, receive, send)
             return
 
         headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
-        resource_url = f"{'https' if scope.get('scheme') != 'http' else 'http'}://{headers.get('host', '')}/mcp"
 
         if scope["method"] == "GET":
             # A GET carrying mcp-session-id is the SSE stream for a session
             # that was already bootstrapped via a (free) initialize POST -
             # let it through untouched. A bare GET with no session-id is
             # exactly the kind of stateless probe OKX's x402-check tool
-            # sends; answer it with the challenge directly instead of
-            # forwarding to fastmcp, which would 400 it (no session).
+            # sends; route it to paid_app so PaymentMiddlewareASGI answers
+            # with its own 402 challenge, instead of this class building
+            # one by hand.
             if "mcp-session-id" not in headers:
-                await _send_402(send, resource_url, "Payment required.")
-                return
-            await self.app(scope, receive, send)
+                await self.paid_app(scope, receive, send)
+            else:
+                await self.free_app(scope, receive, send)
             return
 
         if scope["method"] != "POST":
-            await self.app(scope, receive, send)
+            await self.free_app(scope, receive, send)
             return
 
         body_chunks = []
@@ -370,7 +383,6 @@ class X402Gate:
         # the checker as HTTP 400. Default the params for a bare initialize so
         # the handshake completes and the endpoint reads as valid. A real MCP
         # client sends full params and is unaffected.
-        parsed = None
         try:
             parsed = json.loads(body)
             if (
@@ -387,20 +399,6 @@ class X402Gate:
         except Exception:
             pass
 
-        # tools/list is free ONLY when it carries a session established by a
-        # prior (free) initialize - a real MCP client that's already done the
-        # handshake can list tools, including discovering the free preview
-        # tool, without paying. A bare, sessionless tools/list POST (no prior
-        # initialize) is still priced - that's what OKX's x402-check probe
-        # actually sends, and the "absence of x402 challenge" report was
-        # about exactly that stateless-probe case, not a real client's normal
-        # post-handshake discovery call.
-        tools_list_in_session = (
-            isinstance(parsed, dict)
-            and parsed.get("method") == "tools/list"
-            and "mcp-session-id" in headers
-        )
-
         replayed = False
 
         async def replay_receive():
@@ -410,55 +408,32 @@ class X402Gate:
                 return {"type": "http.request", "body": body, "more_body": False}
             # Body's already fully drained above, so anything the app asks
             # for after this is it watching for a REAL disconnect - forward
-            # to the original receive instead of manufacturing one. This
-            # was the actual bug: hardcoding {"type": "http.disconnect"}
-            # here made fastmcp's Streamable HTTP transport think the
-            # client had gone away mid-response, so it accepted the
-            # initialize/tools handshake (headers + session id already
-            # sent) and then aborted before writing any body - the exact
-            # "200 with an empty body" failure the OKX-side probe found.
+            # to the original receive instead of manufacturing one. Hard-
+            # coding {"type": "http.disconnect"} here previously made
+            # fastmcp's Streamable HTTP transport think the client had gone
+            # away mid-response, so it accepted the initialize/tools
+            # handshake (headers + session id already sent) and then
+            # aborted before writing any body - the "200 with an empty
+            # body" failure an earlier probe found.
             return await receive()
 
-        if _requires_payment(body) and not tools_list_in_session:
-            # OKX's official SDK/buyer replay uses PAYMENT-SIGNATURE; a
-            # generic x402-spec client may send X-PAYMENT instead. Accept
-            # either, preferring PAYMENT-SIGNATURE - this was the other
-            # concrete report: a real paid replay sent as PAYMENT-SIGNATURE
-            # was rejected because only x-payment was ever checked.
-            payment_header = headers.get("payment-signature") or headers.get("x-payment")
-
-            try:
-                if not payment_header:
-                    raise PaymentError("PAYMENT-SIGNATURE (or X-PAYMENT) header is required")
-                await verify_and_settle(payment_header, resource_url)
-            except PaymentError as exc:
-                await _send_402(send, resource_url, str(exc))
-                return
-
-        await self.app(scope, replay_receive, send)
+        target = self.paid_app if not _is_free(body, headers) else self.free_app
+        await target(scope, replay_receive, send)
 
 
-async def _send_402(send, resource_url: str, error: str) -> None:
-    body_dict = payment_required_body(resource_url, error)
-    body = json.dumps(body_dict).encode()
-    # The x402 v2 HTTP transport spec has PAYMENT-REQUIRED carry a
-    # base64-encoded copy of the same object the body already has in plain
-    # JSON. The body stays plain JSON for any client that just reads the
-    # response body (which is all that mattered for the real test so far);
-    # the header is there for clients that read x402 state from headers
-    # only, per spec, and needs to be base64 to match what they expect.
-    header_value = base64.b64encode(body).decode()
-    await send({
-        "type": "http.response.start",
-        "status": 402,
-        "headers": [
-            (b"content-type", b"application/json"),
-            (b"payment-required", header_value.encode()),
-        ],
-    })
-    await send({"type": "http.response.body", "body": body})
-
-
-# AcceptFixer runs first so fastmcp never 406s on headers; X402Gate then
-# applies the 402 challenge on an unpaid priced call.
-mcp_app_gated = X402Gate(AcceptFixer(mcp_app))
+# AcceptFixer runs first on both paths so fastmcp never 406s on headers.
+# free_app skips payment gating entirely; paid_app is the same fastmcp app
+# wrapped in a real PaymentMiddlewareASGI, built in x402.py, which is what
+# OKX's listing check looks for. X402Gate decides which of the two a given
+# request goes to (see its docstring for why that decision can't move into
+# the SDK).
+_free_app = AcceptFixer(mcp_app)
+_paid_app = build_paid_app(
+    AcceptFixer(mcp_app),
+    resource_description=(
+        "Draft sloper pattern pieces from body measurements, nest them "
+        "onto a fabric roll (true NFP placement), and return SVGs, a "
+        "cut-ready DXF, and a cutting sheet with verified fabric savings."
+    ),
+)
+mcp_app_gated = X402Gate(_free_app, _paid_app)
