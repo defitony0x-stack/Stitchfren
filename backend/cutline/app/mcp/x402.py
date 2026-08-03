@@ -1,71 +1,78 @@
 """
-x402 payment gate for Stitchfren's MCP tool.
+x402 payment gate for Stitchfren's MCP tool - SDK-first version.
 
-Same OKX facilitator this project's Node gateway (backend/mcp-gateway) talks
-to, ported to Python so the paid tool call and the pattern-drafting code it
-protects can live in one process/one deploy instead of two.
+The previous version of this file called the OKX facilitator client's
+.verify()/.settle() directly and hand-built the 402 challenge body
+(payment_required_body()) and the PAYMENT-REQUIRED header by hand. That was
+real SDK usage in the sense that OKXFacilitatorClient did the signing and the
+HTTP calls, but it wasn't the pattern OKX's own quickstart shows. The Python
+sample on web3.okx.com/onchainos/dev-docs/payments/service-seller-sdk runs
+the whole flow through x402.http.middleware.fastapi.PaymentMiddlewareASGI:
+that class owns the 402 response, the payment-header parsing, and the
+verify/settle calls. Nothing in this codebase used that class before, and
+that's the specific thing OKX's listing rejection ("service isn't integrated
+with the official OKX Payment SDK") points at.
 
-The shapes below are verified against OKX's own live Onchain OS docs for
-this exact facilitator (web3.okx.com/onchainos/dev-docs/payments/
-api-http-onetime, "exact" scheme section), not just the generic x402 spec -
-OKX's facilitator speaks x402 protocol v2, which differs from v1 in several
-field names. Audited 2026-07-27; re-check against OKX's docs if this stops
-working, in case their API has moved since.
+This file now builds that middleware and exposes build_paid_app(), which
+returns a ready-to-mount ASGI app, instead of reimplementing what the
+middleware does. What still can't move into the SDK's model, on any
+language's SDK, per the same doc page: PaymentMiddlewareASGI prices one
+fixed "METHOD /path" route, and this service's MCP surface is a single
+POST /mcp multiplexing several JSON-RPC methods where only tools/call (for
+the paid tool) should cost money. server.py routes requests to either the
+plain app or this SDK-middleware-wrapped app depending on the JSON-RPC
+method in the body - that dispatch has no SDK equivalent, so it stays custom.
 
-STILL UNVERIFIED - flagged rather than guessed at:
-  - PRICE_ATOMIC assumes USD\u20ae0 uses 6 decimals (matching USDC/USDT
-    convention - block explorer data is consistent with this but it hasn't
-    been confirmed via a direct decimals() contract call).
-  - extra.version="1" is USD\u20ae0's own EIP-712 domain version, a
-    token-contract detail, not the protocol version - unconfirmed against
-    the token contract itself. Wrong here breaks client-side signing
-    (invalid_signature on verify), not this server's own requests.
-Do one real paid call in staging and watch for invalid_signature /
-param_mismatch / requirements_mismatch errorReason values before trusting
-either assumption at volume.
+UNVERIFIED, flagged rather than guessed at - same discipline as the old
+PRICE_ATOMIC decimals flag in this file's previous version:
+  - PaymentMiddlewareASGI's constructor signature and RouteConfig/
+    PaymentOption's exact field names are taken from the one quickstart code
+    sample on that doc page, not from reading the installed package's
+    source. I don't have network access in this environment to
+    `pip install okxweb3-app-x402` and confirm them directly.
+  - Whether RouteConfig/PaymentOption need an explicit `resource` URL field
+    (distinct from the route path key) isn't shown in the sample - left out
+    below on the assumption the middleware derives it from the request,
+    since the doc's own example doesn't pass one.
+Do one real paid call against this in staging before trusting it in
+production, and if PaymentMiddlewareASGI's constructor rejects any of these
+kwargs, paste the TypeError back - it'll name the actual accepted signature.
 """
 
 from __future__ import annotations
 
-import base64
-import hmac
-import hashlib
-import json
 import os
-import time
-from typing import Any, Dict, Optional
+from typing import Optional
 
-import httpx
+from x402.http import (
+    OKXAuthConfig,
+    OKXFacilitatorClient,
+    OKXFacilitatorConfig,
+    PaymentOption,
+)
+from x402.http.middleware.fastapi import PaymentMiddlewareASGI
+from x402.http.types import RouteConfig
+from x402.mechanisms.evm.exact.server import ExactEvmScheme
+from x402.server import x402ResourceServer
 
 NETWORK = "eip155:196"  # X Layer, same chain the Node gateway settles on
-FACILITATOR_BASE = "https://web3.okx.com"
-FACILITATOR_PATH_PREFIX = "/api/v6/pay/x402"
-FACILITATOR_URL = FACILITATOR_BASE + FACILITATOR_PATH_PREFIX
-ASSET_NAME = "USD\u20ae0"
 
 PAY_TO_ADDRESS = os.getenv("PAY_TO_ADDRESS", "0xac27574ce229cbe4f6a48d7195566dd32f3a1fbb")
-USDT0_ASSET_ADDRESS = os.getenv("USDT0_ASSET_ADDRESS", "0x779ded0c9e1022225f8e0630b35a9b54be713736")
 OKX_API_KEY = os.getenv("OKX_API_KEY")
 OKX_SECRET_KEY = os.getenv("OKX_SECRET_KEY")
 OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE")
+OKX_BASE_URL = os.getenv("OKX_BASE_URL", "https://web3.okx.com")
 
-# $0.50 in atomic units at 6 decimals. Override directly with
-# STITCHFREN_PRICE_ATOMIC if USD\u20ae0's decimals turn out to differ.
-PRICE_ATOMIC = os.getenv("STITCHFREN_PRICE_ATOMIC", "500000")
+# USD string, per the doc's own price format ("$0.1"-style) - the middleware
+# converts this to atomic units itself via the scheme registered below. No
+# more hand-called parse_price() or guessed-at AssetAmount field names.
+PRICE_USD = os.getenv("STITCHFREN_PRICE_USD", "$0.50")
 
-# payTo/asset now always have a real value (see defaults above) so the 402
-# challenge's accepts[] is never null on those fields, regardless of
-# Railway env config - this was the root cause of "empty accepts" reports.
-# Facilitator creds are still real secrets and CANNOT have safe defaults -
-# whether THOSE are set is what facilitator_is_configured() below checks,
-# and it's the only thing verify_and_settle now uses to decide fail-open
-# vs fail-closed.
 FACILITATOR_REQUIRED_ENV = [OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE]
 
 # Explicit, opt-in-only escape hatch for local dev when facilitator creds
-# aren't set. Defaults OFF. This existing outside of an explicit "true" is
-# what let a paid tool call through for free in production - see
-# verify_and_settle's docstring for exactly how.
+# aren't set. Defaults OFF. Never set this on the deploy OKX's listing
+# points at - see build_paid_app()'s fail-closed behavior below for why.
 ALLOW_UNPAID_MCP = os.getenv("STITCHFREN_ALLOW_UNPAID_MCP", "false").strip().lower() == "true"
 
 
@@ -73,163 +80,93 @@ def facilitator_is_configured() -> bool:
     return all(FACILITATOR_REQUIRED_ENV)
 
 
-def payment_is_configured() -> bool:
-    # Kept for anything still importing the old name; means the same thing
-    # facilitator_is_configured() does now that payTo/asset always have
-    # values.
-    return facilitator_is_configured()
+class PaymentConfigError(Exception):
+    """Raised at paid-app build time if facilitator creds are missing and
+    the explicit local-dev opt-out isn't set. Message is safe to log."""
 
 
-def sign_okx(method: str, request_path: str, body: str = "") -> Dict[str, str]:
+_facilitator: Optional[OKXFacilitatorClient] = None
+_resource_server: Optional[x402ResourceServer] = None
+
+
+def _get_resource_server() -> x402ResourceServer:
     """
-    Same prehash formula as server.js's signOkx(): timestamp + method +
-    requestPath + body, HMAC-SHA256, base64. Kept in sync with that file -
-    if you change one, change both.
-
-    request_path MUST be the full path OKX signs against, e.g.
-    "/api/v6/pay/x402/verify" - NOT just "/verify". OKX's own API-signing
-    docs (web3.okx.com/onchainos/dev-docs/home/api-access-and-usage) and
-    server.js's own call sites both confirm this; signing a short path here
-    produces a signature OKX will reject with 50113 "Invalid signature" on
-    every call, since the server checks the signature against the actual
-    request path it received.
+    Lazy singleton - import-time (tests, or before env vars are set)
+    shouldn't crash just because nothing's called yet. Same reasoning the
+    old module-level PRICE_ATOMIC/facilitator_is_configured() pairing used.
     """
-    timestamp = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
-    prehash = f"{timestamp}{method.upper()}{request_path}{body}"
-    sign = base64.b64encode(
-        hmac.new(OKX_SECRET_KEY.encode(), prehash.encode(), hashlib.sha256).digest()
-    ).decode()
-    headers = {
-        "OK-ACCESS-KEY": OKX_API_KEY,
-        "OK-ACCESS-SIGN": sign,
-        "OK-ACCESS-TIMESTAMP": timestamp,
-        "OK-ACCESS-PASSPHRASE": OKX_PASSPHRASE,
-    }
-    if method.upper() == "POST":
-        headers["Content-Type"] = "application/json"
-    return headers
+    global _facilitator, _resource_server
+    if _resource_server is None:
+        _facilitator = OKXFacilitatorClient(
+            OKXFacilitatorConfig(
+                auth=OKXAuthConfig(
+                    api_key=OKX_API_KEY or "",
+                    secret_key=OKX_SECRET_KEY or "",
+                    passphrase=OKX_PASSPHRASE or "",
+                ),
+                base_url=OKX_BASE_URL,
+                sync_settle=True,
+            )
+        )
+        _resource_server = x402ResourceServer(_facilitator)
+        _resource_server.register(NETWORK, ExactEvmScheme())
+    return _resource_server
 
 
-def build_payment_requirements() -> Dict[str, Any]:
+def _payment_routes(resource_description: str) -> dict:
     """
-    The single 'accepts' entry describing this tool's price, matching
-    OKX's PaymentRequirements schema exactly: scheme, network, amount,
-    asset, payTo, maxTimeoutSeconds, extra. Nothing else belongs in this
-    object per OKX's docs - resource/description/mimeType live separately
-    at the top level of the 402 body (see payment_required_body below),
-    not inside each accepts[] entry.
+    One route, matching the doc's RouteConfig/PaymentOption shape. Keyed
+    "POST /" rather than "POST /mcp": the app this gets attached to
+    (build_paid_app's return value) is reached through server.py's
+    dispatcher, which is itself mounted at /mcp by app/api/main.py's
+    app.mount("/mcp", mcp_app_gated) - by the time a request reaches this
+    inner app, the /mcp prefix has already been stripped from the scope
+    path by that outer mount.
     """
     return {
-        "scheme": "exact",
-        "network": NETWORK,
-        "amount": PRICE_ATOMIC,
-        "payTo": PAY_TO_ADDRESS,
-        "maxTimeoutSeconds": 60,
-        "asset": USDT0_ASSET_ADDRESS,
-        "extra": {"name": ASSET_NAME, "version": "1"},
+        "POST /": RouteConfig(
+            accepts=[
+                PaymentOption(
+                    scheme="exact",
+                    price=PRICE_USD,
+                    network=NETWORK,
+                    pay_to=PAY_TO_ADDRESS,
+                    max_timeout_seconds=60,
+                ),
+            ],
+            description=resource_description,
+            mime_type="application/json",
+        ),
     }
 
 
-def payment_required_body(resource_url: str, error: str) -> Dict[str, Any]:
+def build_paid_app(inner_app, resource_description: str):
     """
-    The 402 challenge body. x402Version 2 (OKX's facilitator, not v1) -
-    resource is its own top-level object here, per OKX/x402 v2's actual
-    shape, not nested inside each accepts[] entry.
-    """
-    return {
-        "x402Version": 2,
-        "error": error,
-        "resource": {
-            "url": resource_url,
-            "description": (
-                "Draft sloper pattern pieces from body measurements, nest "
-                "them onto a fabric roll (true NFP placement), and return "
-                "SVGs, a cut-ready DXF, and a cutting sheet with verified "
-                "fabric savings."
-            ),
-            "mimeType": "application/json",
-        },
-        "accepts": [build_payment_requirements()],
-        "extensions": {},
-    }
+    Wraps `inner_app` in the real PaymentMiddlewareASGI, wired the way the
+    doc's FastAPI example shows: routes={"POST /": RouteConfig(accepts=
+    [PaymentOption(...)])}, server=x402ResourceServer with ExactEvmScheme
+    registered for eip155:196. The middleware now owns the 402 body, the
+    PAYMENT-REQUIRED header, payment-header parsing, and the verify()/
+    settle() calls - none of that is hand-rolled in this file anymore.
 
-
-class PaymentError(Exception):
-    """Raised for any payment problem; message is safe to show the caller."""
-
-
-async def _facilitator_call(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    path is the short form, e.g. "/verify" - used only to build the request
-    URL. The signature is computed against the FULL path
-    (FACILITATOR_PATH_PREFIX + path) since that's what OKX actually
-    verifies the signature against; see sign_okx's docstring.
-    """
-    body = json.dumps(payload)
-    full_path = FACILITATOR_PATH_PREFIX + path
-    headers = sign_okx("POST", full_path, body)
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.post(FACILITATOR_BASE + full_path, content=body, headers=headers)
-    if resp.status_code >= 400:
-        raise PaymentError(f"Facilitator call to {path} failed ({resp.status_code}): {resp.text}")
-    data = resp.json()
-    # OKX wraps REST responses as {"code": "...", "msg": "...", "data": {...}}
-    # (see server.js's installFacilitatorEnvelopeUnwrap) - unwrap the same way.
-    # Per OKX's own docs: "On business errors, code is non-'0' and data is
-    # null" - so this MUST check code before trusting data, or a business
-    # error (bad signature, unsupported chain, etc) returns None here and
-    # the caller crashes on .get() with an opaque AttributeError instead of
-    # a clear PaymentError naming what actually went wrong.
-    if isinstance(data, dict) and "code" in data:
-        if str(data.get("code")) != "0":
-            raise PaymentError(f"Facilitator error on {path}: {data.get('msg') or data.get('code')}")
-        return data.get("data") or {}
-    return data
-
-
-async def verify_and_settle(payment_header: str, resource_url: str) -> None:
-    """
-    Raises PaymentError if the payment is missing, malformed, or rejected.
-    Returns normally (no return value) once verified and settled.
-
-    payment_header: the raw value from either the PAYMENT-SIGNATURE header
-    (OKX's official SDK) or X-PAYMENT (generic x402 spec) - the caller
-    (X402Gate in server.py) checks both and passes whichever it found.
+    Fails closed: if facilitator creds aren't set and the explicit
+    local-dev opt-out (STITCHFREN_ALLOW_UNPAID_MCP=true) isn't either,
+    raises PaymentConfigError rather than silently building an app that
+    would deliver the paid result for free. Same fail-closed reasoning the
+    old verify_and_settle() used, just enforced at app-build time instead
+    of per-request, since the middleware now owns the per-request path.
     """
     if not facilitator_is_configured():
         if ALLOW_UNPAID_MCP:
-            # Explicit opt-in only (STITCHFREN_ALLOW_UNPAID_MCP=true) - for
-            # local dev with no OKX creds at hand. Never set this on the
-            # deploy OKX's listing points at.
-            return
-        # FAILS CLOSED. This used to `return` silently here whenever
-        # facilitator creds were missing - which meant a Railway deploy
-        # with those env vars unset would deliver the paid result to EVERY
-        # caller for free, with no error and no on-chain settlement. That
-        # is exactly the "deliverable returned, wallet balance unchanged"
-        # report. Refusing outright is the correct behavior for a resource
-        # that's supposed to be sold, not given away by misconfiguration.
-        raise PaymentError(
+            # Explicit opt-in only, for local dev with no OKX creds at
+            # hand. Never set this on the deploy OKX's listing points at.
+            return inner_app
+        raise PaymentConfigError(
             "Payment processing is not configured on this deployment "
-            "(missing OKX facilitator credentials) - refusing to deliver "
-            "a paid result without confirmed on-chain settlement."
+            "(missing OKX facilitator credentials) - refusing to build the "
+            "paid MCP path without confirmed on-chain settlement capability."
         )
 
-    requirements = build_payment_requirements()
-
-    try:
-        payload = json.loads(base64.b64decode(payment_header))
-    except Exception as exc:
-        raise PaymentError(f"Malformed payment header: {exc}") from exc
-
-    verify_result = await _facilitator_call(
-        "/verify", {"x402Version": 2, "paymentPayload": payload, "paymentRequirements": requirements}
-    )
-    if not verify_result.get("isValid", False):
-        raise PaymentError(verify_result.get("invalidReason") or "Payment verification failed.")
-
-    settle_result = await _facilitator_call(
-        "/settle", {"x402Version": 2, "paymentPayload": payload, "paymentRequirements": requirements}
-    )
-    if not settle_result.get("success", False):
-        raise PaymentError(settle_result.get("errorReason") or "Payment settlement failed.")
+    server = _get_resource_server()
+    routes = _payment_routes(resource_description)
+    return PaymentMiddlewareASGI(inner_app, routes=routes, server=server)
