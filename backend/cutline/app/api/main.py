@@ -69,6 +69,19 @@ app.add_middleware(
 )
 
 
+@app.get("/")
+async def root():
+    """
+    Bare-domain liveness check. Some marketplace/reachability probes
+    (OKX's ASP review included) hit the root path before ever trying
+    /mcp or /health, and a 404 there can get reported as "endpoint
+    could not be reached" even though the real API is fine. Keep this
+    trivial and dependency-free so it can never fail for a reason
+    unrelated to whether the service is up.
+    """
+    return {"status": "ok", "service": "Stitchfren", "version": "2.0.0"}
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "2.0.0"}
