@@ -9,6 +9,7 @@ pydantic-settings>=2.4
 python-dotenv>=1.0
 httpx>=0.27
 sqlalchemy>=2.0
+okxweb3-app-x402
 
 # MCP / A2MCP (app/mcp/) - version not independently confirmed against
 # PyPI at time of writing, same caveat as backend/mcp-gateway's @x402/*
