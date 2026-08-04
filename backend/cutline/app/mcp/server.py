@@ -53,7 +53,7 @@ mcp = FastMCP("Stitchfren")
 
 def _build_request(
     style: str,
-    bust_or_chest: float,
+    bust_or_chest: Optional[float],
     waist: float,
     fabric_width_cm: float,
     hip: Optional[float],
@@ -98,9 +98,9 @@ def _build_request(
 @mcp.tool
 async def draft_and_nest_pattern(
     style: str,
-    bust_or_chest: float,
     waist: float,
     fabric_width_cm: float,
+    bust_or_chest: Optional[float] = None,
     hip: Optional[float] = None,
     ease: float = 2.0,
     back_length: float = 40.0,
@@ -125,6 +125,11 @@ async def draft_and_nest_pattern(
     bodice_top, skirt_straight, skirt_aline, mens_shirt,
     mens_shirt_short_sleeve, dress_straight, dress_aline, tshirt,
     mens_trousers, mens_breeches, knickers. All measurements are in cm.
+
+    bust_or_chest: required for every style above except skirt_straight,
+    skirt_aline, mens_trousers, mens_breeches, and knickers - those five are
+    lower-body-only patterns and never use it, so it can be omitted for
+    them. Required (and rejected if missing) for every other style.
 
     quantity: how many copies of this garment to nest together in one
     layout, e.g. 50 for a small production run (default 1, max 50 - this
@@ -166,9 +171,9 @@ async def draft_and_nest_pattern(
 @mcp.tool
 async def draft_and_nest_pattern_preview(
     style: str,
-    bust_or_chest: float,
     waist: float,
     fabric_width_cm: float,
+    bust_or_chest: Optional[float] = None,
     hip: Optional[float] = None,
     ease: float = 2.0,
     back_length: float = 40.0,
