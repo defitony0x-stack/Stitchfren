@@ -10,7 +10,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import List, Optional, Tuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class PatternStyle(str, Enum):
@@ -30,16 +30,33 @@ class PatternStyle(str, Enum):
     knickers = "knickers"
 
 
+# Styles whose drafting functions (see app/drafting/engine.py's dispatch)
+# never read m.bust_or_chest - all lower-body-only garments. Kept as a set
+# here, next to PatternStyle, rather than inside Measurements or the MCP
+# tool, so there's exactly one place that has to stay in sync with
+# engine.py's dispatch if a new style is ever added.
+STYLES_WITHOUT_BUST_OR_CHEST = {
+    PatternStyle.skirt_straight,
+    PatternStyle.skirt_aline,
+    PatternStyle.mens_trousers,
+    PatternStyle.mens_breeches,
+    PatternStyle.knickers,
+}
+
+
 class Measurements(BaseModel):
     """
-    Body measurements in cm. Only bust_or_chest and waist are always required,
-    since drafting/engine.py only touches the fields relevant to the chosen
-    style (e.g. mens_shirt never reads back_length or skirt_length).
+    Body measurements in cm. waist is always required. bust_or_chest is
+    required for every style except the lower-body-only ones in
+    STYLES_WITHOUT_BUST_OR_CHEST (skirts, trousers, breeches, knickers) -
+    see PatternRequest's validator below, which is where that's actually
+    enforced, since only PatternRequest has both the style and the
+    measurements in hand at once.
     Everything else has a default so a partial measurement set doesn't fail
     validation before we even know which style needs which fields.
     """
 
-    bust_or_chest: float = Field(..., gt=0)
+    bust_or_chest: Optional[float] = Field(None, gt=0)
     waist: float = Field(..., gt=0)
     hip: Optional[float] = None
     ease: float = 2.0
@@ -72,6 +89,16 @@ class PatternRequest(BaseModel):
     # ~200 pieces, already a few seconds; thousands of units needs a
     # coarser/batched nester, not this one.
     quantity: int = Field(1, ge=1, le=50)
+
+    @model_validator(mode="after")
+    def _require_bust_or_chest_where_needed(self) -> "PatternRequest":
+        needs_bust = self.style not in STYLES_WITHOUT_BUST_OR_CHEST
+        if needs_bust and self.measurements.bust_or_chest is None:
+            raise ValueError(
+                f"bust_or_chest is required for style={self.style.value!r} "
+                f"(only skirts, trousers, breeches, and knickers can omit it)"
+            )
+        return self
 
 
 class PiecePlacement(BaseModel):
