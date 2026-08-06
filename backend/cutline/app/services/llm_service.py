@@ -49,16 +49,46 @@ _MEASUREMENT_PATTERNS = {
     "ease": [r"\bease\D{0,25}(\d+(?:\.\d+)?)"],
 }
 
+# --- Job parameters: not body measurements, but still worth pulling out of
+# the same free text so "on 60cm fabric, make 8" fills the Fabric width /
+# Quantity fields alongside the measurements, instead of only measurements
+# being covered. Kept as a separate dict from _MEASUREMENT_PATTERNS (which
+# maps onto the Measurements pydantic model 1:1) since these two map onto
+# PatternRequest's own fields instead - the parser doesn't care about that
+# distinction, but it matters to anyone reading this file later. ---
+_JOB_PARAM_PATTERNS = {
+    "fabric_width_cm": [
+        r"fabric[\s_-]?width\D{0,25}(\d+(?:\.\d+)?)",
+        r"(\d+(?:\.\d+)?)\s*cm[\s-]?(?:wide|width)\b",
+        r"on\s+(\d+(?:\.\d+)?)\s*cm\s+fabric",
+    ],
+    "quantity": [
+        r"(?:quantity|qty)\D{0,10}(\d+)",
+        r"(?:make|need|cut|produce)\D{0,10}(\d+)",
+        r"run of\D{0,5}(\d+)",
+        r"batch of\D{0,5}(\d+)",
+        r"(\d+)\s*(?:pieces|units|copies|garments)\b",
+    ],
+}
+
+_ALL_TEXT_PATTERNS = {**_MEASUREMENT_PATTERNS, **_JOB_PARAM_PATTERNS}
+
 
 def parse_measurements_from_text(text: str) -> Optional[Dict[str, Any]]:
     """
     Regex fallback used when the LLM is unconfigured or fails. Returns
-    numeric measurement fields plus an optional "style" string key (see
-    guess_style_from_text) - the str/float mix is intentional, not a bug.
+    numeric measurement/job-parameter fields plus an optional "style"
+    string key (see guess_style_from_text) - the str/float mix is
+    intentional, not a bug.
+
+    "quantity" defaults to 1 whenever anything else in the text parses
+    successfully, even if the text never mentions a quantity - a single
+    garment is a safer default than leaving the field unfilled (and
+    ambiguous) after an otherwise-successful parse.
     """
     lowered = text.lower()
     found: Dict[str, Any] = {}
-    for field, patterns in _MEASUREMENT_PATTERNS.items():
+    for field, patterns in _ALL_TEXT_PATTERNS.items():
         for pattern in patterns:
             match = re.search(pattern, lowered)
             if match:
@@ -70,6 +100,8 @@ def parse_measurements_from_text(text: str) -> Optional[Dict[str, Any]]:
     style = guess_style_from_text(text)
     if style:
         found["style"] = style
+    if found and "quantity" not in found:
+        found["quantity"] = 1.0
     return found or None
 
 
@@ -158,11 +190,13 @@ async def enhance_with_llm(text: str) -> Optional[Dict[str, Any]]:
     """
     valid_styles = ", ".join(s.value for s in PatternStyle)
     prompt = (
-        "Extract sewing body measurements in centimeters from the text below. "
-        "Respond with ONLY a raw JSON object (no markdown fences, no prose) "
-        "using any of these keys you can confidently find: bust_or_chest, "
-        "waist, hip, back_length, skirt_length, shoulder_width, "
-        "sleeve_length, shirt_length, ease. Omit keys you can't find. "
+        "Extract sewing job details in centimeters from the text below: "
+        "body measurements, the fabric width being cut on, and how many "
+        "garments to make. Respond with ONLY a raw JSON object (no markdown "
+        "fences, no prose) using any of these keys you can confidently "
+        "find: bust_or_chest, waist, hip, back_length, skirt_length, "
+        "shoulder_width, sleeve_length, shirt_length, ease, "
+        "fabric_width_cm, quantity. Omit keys you can't find. "
         "Also include a \"style\" key with your best guess of the garment "
         f"being described, using exactly one of these values: {valid_styles}. "
         "Omit \"style\" entirely if you're not reasonably confident.\n\n"
@@ -183,7 +217,7 @@ async def enhance_with_llm(text: str) -> Optional[Dict[str, Any]]:
     # Only keep numeric values for known fields - never trust the LLM to
     # only emit the schema we asked for.
     cleaned = {}
-    for key in _MEASUREMENT_PATTERNS:
+    for key in _ALL_TEXT_PATTERNS:
         if key in parsed:
             try:
                 cleaned[key] = float(parsed[key])
@@ -202,6 +236,11 @@ async def enhance_with_llm(text: str) -> Optional[Dict[str, Any]]:
         guessed = guess_style_from_text(text)
         if guessed:
             cleaned["style"] = guessed
+
+    # Same "quantity defaults to 1 if the text didn't say" rule as the
+    # rule-based path - see parse_measurements_from_text.
+    if cleaned and "quantity" not in cleaned:
+        cleaned["quantity"] = 1.0
 
     return cleaned or None
 
