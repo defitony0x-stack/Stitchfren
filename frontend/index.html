@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -890,6 +889,21 @@
     fSkirtLength: 'skirt_length',
     fSleeveLength: 'sleeve_length',
     fShirtLength: 'shirt_length',
+    fFabricWidth: 'fabric_width_cm',
+    fQuantity: 'quantity',
+  };
+
+  // Nicer labels for the confirmation banner than a raw snake_case key.
+  const FREETEXT_FIELD_LABELS = {
+    bust_or_chest: 'bust/chest',
+    waist: 'waist',
+    hip: 'hip',
+    shoulder_width: 'shoulder width',
+    skirt_length: 'skirt/dress length',
+    sleeve_length: 'sleeve length',
+    shirt_length: 'garment length',
+    fabric_width_cm: 'fabric width',
+    quantity: 'quantity',
   };
 
   // Optional free-text measurement entry. Calls /api/parse-text (LLM with a
@@ -925,7 +939,7 @@
         const key = FREETEXT_FIELD_MAP[fieldId];
         if(typeof d[key] === 'number'){
           document.getElementById(fieldId).value = d[key];
-          filled.push(key.replace(/_/g, ' ') + ': ' + d[key]);
+          filled.push((FREETEXT_FIELD_LABELS[key] || key) + ': ' + d[key]);
         }
       });
 
