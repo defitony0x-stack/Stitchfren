@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -310,6 +311,12 @@
   }
   .demo-freetext-status{font-family:'IBM Plex Mono',monospace;font-size:.78rem;color:var(--ink-soft);}
   .demo-freetext-status.err{color:var(--rose-deep);}
+  .demo-freetext-confirm{
+    margin-top:10px;padding:10px 14px;border-radius:8px;font-size:.82rem;line-height:1.5;
+    background:#fff8e6;border:1px solid #f0d78c;color:#6b5410;
+  }
+  .demo-freetext-confirm.hidden{display:none;}
+  .demo-freetext-confirm b{font-weight:600;}
   .demo-actions{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:24px;}
   .demo-status{font-family:'IBM Plex Mono',monospace;font-size:.8rem;color:var(--ink-soft);}
   .demo-status.err{color:var(--rose-deep);}
@@ -546,6 +553,7 @@
                 <button id="freeTextParse" type="button">Fill in fields from text</button>
                 <span id="freeTextStatus" class="demo-freetext-status"></span>
               </div>
+              <div id="freeTextConfirm" class="demo-freetext-confirm hidden"></div>
             </div>
 
             <form id="demoForm" class="demo-form">
@@ -572,6 +580,9 @@
               </label>
               <label>Waist (cm)
                 <input id="fWaist" type="number" step="0.1" value="74" required />
+              </label>
+              <label id="fieldShoulderWidth">Shoulder width (cm)
+                <input id="fShoulderWidth" type="number" step="0.1" placeholder="auto from chest if left blank" />
               </label>
               <label id="fieldHip">Hip (cm)
                 <input id="fHip" type="number" step="0.1" value="98" />
@@ -731,6 +742,7 @@
   const freeTextArea = document.getElementById('freeText');
   const freeTextBtn = document.getElementById('freeTextParse');
   const freeTextStatusEl = document.getElementById('freeTextStatus');
+  const freeTextConfirmEl = document.getElementById('freeTextConfirm');
 
   // ?api=... sets a one-time override (for internal testing against a
   // staging backend) without ever putting the URL on the visible page.
@@ -788,17 +800,17 @@
   // fields are just noise for those styles. Keeps the form honest about
   // what a given style will and won't use.
   const STYLE_FIELDS = {
-    bodice_aline:            ['hip', 'skirtLength'],
-    bodice_straight:         ['hip', 'skirtLength'],
-    bodice_aline_sleeved:    ['hip', 'skirtLength', 'sleeveLength'],
-    bodice_top:              [],
+    bodice_aline:            ['hip', 'skirtLength', 'shoulderWidth'],
+    bodice_straight:         ['hip', 'skirtLength', 'shoulderWidth'],
+    bodice_aline_sleeved:    ['hip', 'skirtLength', 'sleeveLength', 'shoulderWidth'],
+    bodice_top:              ['shoulderWidth'],
     skirt_straight:          ['hip', 'skirtLength'],
     skirt_aline:             ['hip', 'skirtLength'],
-    mens_shirt:              ['sleeveLength', 'shirtLength'],
-    mens_shirt_short_sleeve: ['sleeveLength', 'shirtLength'],
-    dress_straight:          ['hip', 'skirtLength'],
-    dress_aline:             ['hip', 'skirtLength'],
-    tshirt:                  ['sleeveLength', 'shirtLength'],
+    mens_shirt:              ['sleeveLength', 'shirtLength', 'shoulderWidth'],
+    mens_shirt_short_sleeve: ['sleeveLength', 'shirtLength', 'shoulderWidth'],
+    dress_straight:          ['hip', 'skirtLength', 'shoulderWidth'],
+    dress_aline:             ['hip', 'skirtLength', 'shoulderWidth'],
+    tshirt:                  ['sleeveLength', 'shirtLength', 'shoulderWidth'],
     mens_trousers:           ['hip', 'rise', 'trouserLength'],
     mens_breeches:           ['hip', 'rise', 'trouserLength'],
     knickers:                ['hip', 'rise'],
@@ -810,6 +822,7 @@
     shirtLength: 'fieldShirtLength',
     rise: 'fieldRise',
     trouserLength: 'fieldTrouserLength',
+    shoulderWidth: 'fieldShoulderWidth',
   };
   const styleSelect = document.getElementById('fStyle');
 
@@ -822,14 +835,74 @@
   }
   styleSelect.addEventListener('change', updateFieldsForStyle);
 
+  // Client-side style guess: same idea as the backend's guess_style_from_text
+  // (app/services/llm_service.py), kept independently here as a fallback for
+  // when the backend response doesn't include a "style" key at all (older
+  // deploy, or a backend that hasn't picked up that change yet). Order
+  // matters - more specific phrasing is checked before the generic word it
+  // contains, same reasoning as the backend version.
+  const STYLE_GUESS_PATTERNS = [
+    ['tshirt', [/t[\s-]?shirt/i]],
+    ['mens_shirt_short_sleeve', [/short[\s-]?sleeve/i]],
+    ['mens_shirt', [/men'?s?\s+shirt/i, /\bshirt\b/i]],
+    ['bodice_aline_sleeved', [/bodice.{0,20}sleev/i, /sleev.{0,20}bodice/i]],
+    ['bodice_aline', [/a[\s-]?line.{0,20}bodice/i, /bodice.{0,20}a[\s-]?line/i]],
+    ['bodice_top', [/bodice.{0,10}top/i]],
+    ['bodice_straight', [/\bbodice\b/i]],
+    ['dress_aline', [/a[\s-]?line.{0,20}dress/i, /dress.{0,20}a[\s-]?line/i]],
+    ['dress_straight', [/\bdress\b/i]],
+    ['skirt_aline', [/a[\s-]?line.{0,20}skirt/i, /skirt.{0,20}a[\s-]?line/i]],
+    ['skirt_straight', [/\bskirt\b/i]],
+    ['mens_breeches', [/\bbreeches\b/i]],
+    ['knickers', [/\bknickers\b/i]],
+    ['mens_trousers', [/\btrousers?\b/i, /\bpants\b/i]],
+  ];
+  function guessStyleFromText(text){
+    for(const [style, patterns] of STYLE_GUESS_PATTERNS){
+      if(patterns.some(p => p.test(text))) return style;
+    }
+    return null;
+  }
+
+  const STYLE_LABELS = {
+    bodice_aline: 'Bodice — A-line',
+    bodice_straight: 'Bodice — Straight',
+    bodice_aline_sleeved: 'Bodice — A-line, sleeved',
+    bodice_top: 'Bodice — Top',
+    skirt_straight: 'Skirt — Straight',
+    skirt_aline: 'Skirt — A-line',
+    mens_shirt: "Men's shirt — Long sleeve",
+    mens_shirt_short_sleeve: "Men's shirt — Short sleeve",
+    dress_straight: 'Dress — Straight',
+    dress_aline: 'Dress — A-line',
+    tshirt: 'T-shirt',
+    mens_trousers: "Men's trousers",
+    mens_breeches: 'Men\'s breeches (knee-length)',
+    knickers: 'Knickers',
+  };
+
+  // Field id -> backend key, for every field the free-text parser can fill.
+  const FREETEXT_FIELD_MAP = {
+    fBust: 'bust_or_chest',
+    fWaist: 'waist',
+    fHip: 'hip',
+    fShoulderWidth: 'shoulder_width',
+    fSkirtLength: 'skirt_length',
+    fSleeveLength: 'sleeve_length',
+    fShirtLength: 'shirt_length',
+  };
+
   // Optional free-text measurement entry. Calls /api/parse-text (LLM with a
-  // rule-based fallback server-side) and fills in whichever of the existing
-  // bust/waist/hip fields the parser found. Never touches Style, fabric
-  // width, or seam allowance, and never blocks the normal structured-form
-  // submit flow below.
+  // rule-based fallback server-side) and fills in every measurement field
+  // the parser found, plus the Style dropdown (from the backend's guess, or
+  // this page's own keyword guess as a fallback). Never blocks the normal
+  // structured-form submit flow below, and always leaves a visible summary
+  // of what changed so nothing gets submitted unreviewed.
   freeTextBtn.addEventListener('click', async function(){
     const text = freeTextArea.value.trim();
     const base = getApiBase();
+    freeTextConfirmEl.classList.add('hidden');
+    freeTextConfirmEl.textContent = '';
     if(!base){ freeTextStatusEl.textContent = 'Set the API endpoint above first.'; freeTextStatusEl.classList.add('err'); return; }
     if(!text){ freeTextStatusEl.textContent = 'Paste some measurements first.'; freeTextStatusEl.classList.add('err'); return; }
     freeTextStatusEl.classList.remove('err');
@@ -846,10 +919,38 @@
         throw new Error(data.detail || 'Could not parse that text.');
       }
       const d = data.data || {};
-      if(typeof d.bust_or_chest === 'number') document.getElementById('fBust').value = d.bust_or_chest;
-      if(typeof d.waist === 'number') document.getElementById('fWaist').value = d.waist;
-      if(typeof d.hip === 'number') document.getElementById('fHip').value = d.hip;
-      freeTextStatusEl.textContent = 'Filled in from ' + (data.source === 'llm' ? 'AI parsing' : 'text') + '. Review below, then submit.';
+      const filled = [];
+
+      Object.keys(FREETEXT_FIELD_MAP).forEach(function(fieldId){
+        const key = FREETEXT_FIELD_MAP[fieldId];
+        if(typeof d[key] === 'number'){
+          document.getElementById(fieldId).value = d[key];
+          filled.push(key.replace(/_/g, ' ') + ': ' + d[key]);
+        }
+      });
+
+      // Style: prefer the backend's guess; fall back to this page's own
+      // keyword match if the backend didn't return one.
+      const guessedStyle = (typeof d.style === 'string' && STYLE_LABELS[d.style])
+        ? d.style
+        : guessStyleFromText(text);
+      let styleChanged = false;
+      if(guessedStyle && styleSelect.value !== guessedStyle){
+        styleSelect.value = guessedStyle;
+        updateFieldsForStyle();
+        styleChanged = true;
+      }
+
+      const parts = [];
+      if(styleChanged) parts.push('<b>Style set to "' + STYLE_LABELS[guessedStyle] + '"</b> based on your text');
+      if(filled.length) parts.push('filled: ' + filled.join(', '));
+
+      freeTextConfirmEl.innerHTML =
+        (parts.length ? parts.join(' — ') + '. ' : '') +
+        '⚠️ This was auto-filled and may be wrong — double-check every field (including Style) before you hit "Draft &amp; nest this".';
+      freeTextConfirmEl.classList.remove('hidden');
+
+      freeTextStatusEl.textContent = 'Filled in from ' + (data.source === 'llm' ? 'AI parsing' : 'text') + '.';
     } catch(err){
       freeTextStatusEl.textContent = err.message;
       freeTextStatusEl.classList.add('err');
@@ -946,6 +1047,7 @@
         bust_or_chest: parseFloat(document.getElementById('fBust').value),
         waist: parseFloat(document.getElementById('fWaist').value),
         hip: document.getElementById('fHip').value ? parseFloat(document.getElementById('fHip').value) : null,
+        shoulder_width: document.getElementById('fShoulderWidth').value ? parseFloat(document.getElementById('fShoulderWidth').value) : null,
         skirt_length: parseFloat(document.getElementById('fSkirtLength').value || '55'),
         sleeve_length: parseFloat(document.getElementById('fSleeveLength').value || '60'),
         shirt_length: parseFloat(document.getElementById('fShirtLength').value || '70'),
