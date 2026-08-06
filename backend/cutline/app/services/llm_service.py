@@ -18,6 +18,8 @@ from typing import Any, Dict, Optional
 
 import httpx
 
+from ..models.schemas import PatternStyle
+
 LLM_API_KEY = os.getenv("LLM_API_KEY")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
@@ -48,10 +50,14 @@ _MEASUREMENT_PATTERNS = {
 }
 
 
-def parse_measurements_from_text(text: str) -> Optional[Dict[str, float]]:
-    """Regex fallback used when the LLM is unconfigured or fails."""
+def parse_measurements_from_text(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Regex fallback used when the LLM is unconfigured or fails. Returns
+    numeric measurement fields plus an optional "style" string key (see
+    guess_style_from_text) - the str/float mix is intentional, not a bug.
+    """
     lowered = text.lower()
-    found: Dict[str, float] = {}
+    found: Dict[str, Any] = {}
     for field, patterns in _MEASUREMENT_PATTERNS.items():
         for pattern in patterns:
             match = re.search(pattern, lowered)
@@ -61,7 +67,57 @@ def parse_measurements_from_text(text: str) -> Optional[Dict[str, float]]:
                     break
                 except ValueError:
                     continue
+    style = guess_style_from_text(text)
+    if style:
+        found["style"] = style
     return found or None
+
+
+# --- Style guess: ordered (style, [patterns]) pairs, checked top to bottom,
+# first match wins. Order matters - more specific phrasing has to be checked
+# before the generic garment word it contains (e.g. "short sleeve shirt"
+# before bare "shirt", "a-line skirt" before bare "skirt") or the specific
+# case never gets a chance to match. Used both as the fallback when the LLM
+# is unconfigured/fails, and to validate whatever style the LLM guessed. ---
+_STYLE_PATTERNS: list[tuple[PatternStyle, list[str]]] = [
+    # t-shirt has to be checked before the generic \bshirt\b pattern below,
+    # since "t-shirt" contains a word-boundary-delimited "shirt" and would
+    # otherwise match mens_shirt first.
+    (PatternStyle.tshirt, [r"t[\s-]?shirt"]),
+    (PatternStyle.mens_shirt_short_sleeve, [r"short[\s-]?sleeve"]),
+    (PatternStyle.mens_shirt, [r"men'?s?\s+shirt", r"\bshirt\b"]),
+    (PatternStyle.bodice_aline_sleeved, [r"bodice.{0,20}sleev", r"sleev.{0,20}bodice"]),
+    (PatternStyle.bodice_aline, [r"a[\s-]?line.{0,20}bodice", r"bodice.{0,20}a[\s-]?line"]),
+    # Bare "top" is deliberately not matched here - it collides with the
+    # "92 up top" bust/chest phrasing in _MEASUREMENT_PATTERNS, so a plain
+    # "top" mention only counts when it's clearly attached to "bodice".
+    (PatternStyle.bodice_top, [r"bodice.{0,10}top"]),
+    (PatternStyle.bodice_straight, [r"\bbodice\b"]),
+    (PatternStyle.dress_aline, [r"a[\s-]?line.{0,20}dress", r"dress.{0,20}a[\s-]?line"]),
+    (PatternStyle.dress_straight, [r"\bdress\b"]),
+    (PatternStyle.skirt_aline, [r"a[\s-]?line.{0,20}skirt", r"skirt.{0,20}a[\s-]?line"]),
+    (PatternStyle.skirt_straight, [r"\bskirt\b"]),
+    (PatternStyle.mens_breeches, [r"\bbreeches\b"]),
+    (PatternStyle.knickers, [r"\bknickers\b"]),
+    (PatternStyle.mens_trousers, [r"\btrousers?\b", r"\bpants\b"]),
+]
+
+
+def guess_style_from_text(text: str) -> Optional[str]:
+    """
+    Best-effort style guess from free text, used as: (a) the fallback when
+    the LLM is unconfigured or its own style guess doesn't validate, and
+    (b) the value returned to the frontend when only the rule-based
+    measurement parser ran. Returns a valid PatternStyle string or None -
+    never guessing is safer than guessing wrong, so this only returns a
+    value when a pattern actually matches.
+    """
+    lowered = text.lower()
+    for style, patterns in _STYLE_PATTERNS:
+        for pattern in patterns:
+            if re.search(pattern, lowered):
+                return style.value
+    return None
 
 
 def _strip_code_fence(content: str) -> str:
@@ -100,12 +156,16 @@ async def enhance_with_llm(text: str) -> Optional[Dict[str, Any]]:
     exception) on any failure so callers fall through to the rule-based
     parser in parse_measurements_from_text - see app/api/main.py parse_text().
     """
+    valid_styles = ", ".join(s.value for s in PatternStyle)
     prompt = (
         "Extract sewing body measurements in centimeters from the text below. "
         "Respond with ONLY a raw JSON object (no markdown fences, no prose) "
         "using any of these keys you can confidently find: bust_or_chest, "
         "waist, hip, back_length, skirt_length, shoulder_width, "
-        "sleeve_length, shirt_length, ease. Omit keys you can't find.\n\n"
+        "sleeve_length, shirt_length, ease. Omit keys you can't find. "
+        "Also include a \"style\" key with your best guess of the garment "
+        f"being described, using exactly one of these values: {valid_styles}. "
+        "Omit \"style\" entirely if you're not reasonably confident.\n\n"
         f"Text: {text}"
     )
     content = await _chat_completion(prompt)
@@ -129,6 +189,20 @@ async def enhance_with_llm(text: str) -> Optional[Dict[str, Any]]:
                 cleaned[key] = float(parsed[key])
             except (TypeError, ValueError):
                 continue
+
+    # Style is a free-text field from the LLM's point of view, so validate
+    # it against the real enum before trusting it - an invalid/hallucinated
+    # value falls back to the same keyword guesser used when there's no LLM
+    # at all, rather than being dropped silently.
+    llm_style = parsed.get("style")
+    valid_values = {s.value for s in PatternStyle}
+    if isinstance(llm_style, str) and llm_style in valid_values:
+        cleaned["style"] = llm_style
+    else:
+        guessed = guess_style_from_text(text)
+        if guessed:
+            cleaned["style"] = guessed
+
     return cleaned or None
 
 
