@@ -2,8 +2,9 @@
 DXF export for Stitchfren pattern pieces.
 
 Writes the NESTED layout - the same one shown in the layout SVG and used
-for the fabric-savings numbers - to a DXF (R2010), in cm, with four things
-a professional pattern-cutting file is expected to have:
+for the fabric-savings numbers - to a DXF (R2018 / AC1032, AutoCAD 2018+),
+in cm, with four things a professional pattern-cutting file is expected
+to have:
 
   1. The cut line (PIECE_OUTLINE layer) - the outer, seam-allowance-
      included boundary.
@@ -29,6 +30,7 @@ import math
 from typing import Callable, Dict, List, Optional, Tuple
 
 import ezdxf
+from ezdxf import bbox as ezdxf_bbox
 from ezdxf.enums import TextEntityAlignment
 
 from ..svg_export import _short_label, _job_caption
@@ -137,8 +139,8 @@ def export_to_dxf(
     grain_lookup: Optional[Dict[str, float]] = None,
 ) -> str:
     """
-    Writes the NESTED layout to `filename` as a DXF (R2010) and returns the
-    path.
+    Writes the NESTED layout to `filename` as a DXF (R2018 / AC1032) and
+    returns the path.
 
     piece_lookup / placements: the same shapes render_nested_layout_svg
     takes - piece_lookup maps a piece's label to its cut-line points,
@@ -164,7 +166,7 @@ def export_to_dxf(
     stitch_lookup = stitch_lookup or {}
     grain_lookup = grain_lookup or {}
 
-    doc = ezdxf.new("R2010", setup=True)
+    doc = ezdxf.new("R2018", setup=True)
     doc.header["$INSUNITS"] = ezdxf.units.CM
     doc.header["$MEASUREMENT"] = 1  # metric - some importers check this separately from $INSUNITS
 
@@ -243,5 +245,72 @@ def export_to_dxf(
             align=TextEntityAlignment.MIDDLE_CENTER,
         )
 
+    # Compute real drawing extents so CAD software's "zoom to extents" /
+    # "zoom to fit" works correctly on open, instead of ezdxf's default
+    # sentinel placeholder values ($EXTMIN = (1e20, 1e20), $EXTMAX =
+    # (-1e20, -1e20)). fast=True skips precise font-metric text bounding
+    # (fine here - PIECE_LABEL/caption text is a tiny fraction of the
+    # drawing's real extent, dominated by the piece outlines and fabric
+    # boundary) and just uses each entity's insertion point/vertices,
+    # which is enough for a correct extents box on every entity type this
+    # exporter actually writes (LWPOLYLINE, LINE, TEXT).
+    #
+    # IMPORTANT: setting doc.header["$EXTMIN"/"$EXTMAX"] before saveas()
+    # does NOT work - confirmed by direct testing. ezdxf resets both to
+    # the sentinel values during doc.saveas() regardless of what's
+    # assigned beforehand; it won't persist extents it hasn't verified
+    # itself. So: save first, then patch the sentinel values in the
+    # written file's text directly (see _patch_header_extents below) -
+    # this is the only way to get real values into this header field
+    # with ezdxf's public API as of 1.4.x.
+    extents = ezdxf_bbox.extents(msp, fast=True)
     doc.saveas(filename)
+    if extents.has_data:
+        _patch_header_extents(
+            filename,
+            extmin=(extents.extmin.x, extents.extmin.y),
+            extmax=(extents.extmax.x, extents.extmax.y),
+        )
     return filename
+
+
+def _patch_header_extents(
+    filename: str,
+    extmin: Tuple[float, float],
+    extmax: Tuple[float, float],
+) -> None:
+    """
+    Rewrites the $EXTMIN/$EXTMAX point values directly in the saved DXF's
+    text, working around ezdxf resetting both to sentinel placeholder
+    values during doc.saveas() (see the comment above this function's
+    call site for how that was confirmed). DXF's ASCII form is just
+    "group code" / "value" line pairs, so this locates the '$EXTMIN' and
+    '$EXTMAX' header-variable-name lines and overwrites the three value
+    lines immediately following each one's 10/20/30 (x/y/z) group-code
+    lines - narrow and structural, not a blind find-and-replace on the
+    sentinel numbers themselves (which would risk corrupting a real
+    coordinate elsewhere in the file that happened to equal 1e+20).
+    """
+    with open(filename, "r", encoding="utf-8") as f:
+        lines = f.read().splitlines()
+
+    targets = {"$EXTMIN": extmin, "$EXTMAX": extmax}
+    i = 0
+    while i < len(lines):
+        name = lines[i].strip()
+        if name in targets and i > 0 and lines[i - 1].strip() == "9":
+            x, y = targets[name]
+            # The three group-code/value pairs immediately following are
+            # 10/x, 20/y, 30/z, in that fixed order - this is how ezdxf
+            # (and every DXF writer) emits a 3D point header variable.
+            for offset, value in ((2, x), (4, y)):
+                # i+1 is the '10' code line, i+2 its value; i+3 is '20',
+                # i+4 its value. z (code 30) is left untouched - always
+                # 0.0 for this 2D pattern export either way.
+                lines[i + offset] = str(value)
+            i += 7  # skip past this var's 3 pairs (10/x, 20/y, 30/z) entirely
+        else:
+            i += 1
+
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")

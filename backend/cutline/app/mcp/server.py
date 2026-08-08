@@ -117,9 +117,10 @@ async def draft_and_nest_pattern(
 ) -> Dict[str, Any]:
     """
     Draft sloper pattern pieces from body measurements and nest them onto a
-    fabric roll using true Minkowski-sum NFP placement. Returns a cut-ready
-    DXF, pattern and layout SVGs, and a plain-language cutting sheet with
-    verified fabric savings. Price: 0.5 USDT per call.
+    fabric roll using true Minkowski-sum NFP placement. Returns package_url:
+    a single ZIP containing a professional PDF cutting-sheet write-up, the
+    cut-ready DXF, and both pattern/layout SVGs - plus the same files as
+    individual links for callers that only want one. Price: 0.5 USDT per call.
 
     style: one of bodice_aline, bodice_straight, bodice_aline_sleeved,
     bodice_top, skirt_straight, skirt_aline, mens_shirt,
@@ -157,6 +158,11 @@ async def draft_and_nest_pattern(
     return {
         "ok": True,
         "message": message,
+        # package_url is the primary deliverable: one ZIP containing the
+        # PDF spec sheet, the DXF, and both SVGs - see app/mcp/package.py.
+        # The individual links below are kept for callers that want just
+        # one file without downloading the whole bundle.
+        "package_url": result.get("package_url"),
         "download_url": result.get("dxf_url"),
         "pattern_svg_url": result.get("pattern_svg_url"),
         "layout_svg_url": result.get("layout_svg_url"),
@@ -203,14 +209,15 @@ async def draft_and_nest_pattern_preview(
         rise, trouser_length,
     )
 
-    result = await run_pattern_job(request, skip_llm=True)
+    result = await run_pattern_job(request, skip_llm=True, skip_package=True)
 
     return {
         "ok": True,
         "message": (
             "This is a preview - drafting and nesting numbers are real, but "
             "the DXF is withheld and the SVGs are watermarked. Call "
-            "draft_and_nest_pattern (0.5 USDT) for the cut-ready DXF."
+            "draft_and_nest_pattern (0.5 USDT) for the cut-ready DXF and "
+            "the full PDF + DXF + SVG package."
         ),
         "download_url": None,
         "pattern_svg": watermark_svg(result.get("pattern_svg", "")),

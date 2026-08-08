@@ -249,6 +249,19 @@ async def download_dxf(filename: str):
     raise HTTPException(404, "File not found")
 
 
+# Same local-/tmp fallback as download_dxf above, for the bundled
+# PDF+DXF+SVG ZIP built in app/mcp/job.py (app/mcp/package.py) when R2
+# isn't configured. Same multi-instance/ephemeral-filesystem caveat
+# applies here too - see r2.py's module docstring for why R2, not this
+# route, is the real production path for both.
+@app.get("/download/package/{filename}")
+async def download_package(filename: str):
+    path = f"/tmp/{filename}"
+    if os.path.exists(path):
+        return FileResponse(path, media_type="application/zip", filename=filename)
+    raise HTTPException(404, "File not found")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app.api.main:app", host="0.0.0.0", port=8000, reload=True)
